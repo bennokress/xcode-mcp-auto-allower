@@ -149,6 +149,8 @@ DMG_NAME="Xcode.MCP.Auto-Allower-${VERSION}"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}.dmg"
 DMG_TEMP="${BUILD_DIR}/${DMG_NAME}-temp.dmg"
 
+DMG_BG="${REPO_DIR}/Assets/dmg-background.png"
+
 echo "==> Creating DMG..."
 rm -f "$DMG_PATH" "$DMG_TEMP"
 
@@ -156,7 +158,7 @@ rm -f "$DMG_PATH" "$DMG_TEMP"
 hdiutil create -size 50m -fs HFS+ -volname "${APP_NAME}" "$DMG_TEMP" -quiet
 
 # Mount it — volume name is known, so construct the path directly
-hdiutil attach "$DMG_TEMP" -nobrowse -readwrite -quiet
+hdiutil attach "$DMG_TEMP" -readwrite -quiet
 MOUNT_POINT="/Volumes/${APP_NAME}"
 
 echo "    Mounted at: ${MOUNT_POINT}"
@@ -165,12 +167,40 @@ echo "    Mounted at: ${MOUNT_POINT}"
 cp -R "${APP_BUNDLE}" "${MOUNT_POINT}/"
 ln -s /Applications "${MOUNT_POINT}/Applications"
 
-# Optional: set icon positions if create-dmg is available
-if command -v create-dmg &>/dev/null; then
-    echo "    Note: create-dmg found but using hdiutil for simplicity."
+# Set up background image
+if [ -f "$DMG_BG" ]; then
+    mkdir -p "${MOUNT_POINT}/.background"
+    cp "$DMG_BG" "${MOUNT_POINT}/.background/background.png"
+    echo "    Background image copied."
 fi
 
-# Unmount
+# Configure Finder window appearance via AppleScript
+echo "    Configuring window appearance..."
+osascript <<ASEOF
+tell application "Finder"
+    tell disk "${APP_NAME}"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {100, 100, 880, 540}
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 128
+        set background picture of viewOptions to file ".background:background.png"
+        set position of item "${APP_NAME}.app" of container window to {155, 170}
+        set position of item "Applications" of container window to {625, 170}
+        close
+        open
+        update without registering applications
+        delay 1
+    end tell
+end tell
+ASEOF
+echo "    Window appearance configured."
+
+# Sync filesystem changes and unmount
+sync
 hdiutil detach "$MOUNT_POINT" -quiet
 
 # Convert to compressed read-only DMG
