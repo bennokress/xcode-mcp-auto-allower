@@ -285,6 +285,30 @@ enum LaunchAgentStatus {
     case notFound
 }
 
+// MARK: - Download Delegate
+
+/// Bridges `URLSessionDownloadDelegate` callbacks to closures for progress tracking and completion handling.
+class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    var onProgress: ((Double) -> Void)?
+    var onComplete: ((URL) -> Void)?
+    var onError: (() -> Void)?
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        onProgress?(fraction)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        onComplete?(location)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard error != nil else { return }
+        onError?()
+    }
+}
+
 // MARK: - App Delegate
 
 /// The main application delegate handling window management, daemon lifecycle, and updates.
@@ -941,65 +965,93 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             return
         }
 
-        // Show progress
+        // Build progress UI
         let progressAlert = NSAlert()
-        progressAlert.messageText = "Downloading Update..."
-        progressAlert.informativeText = "Installing \(latest) \u{2014} this may take a moment."
+        progressAlert.messageText = "Updating to \(latest)\u{2026}"
+        progressAlert.informativeText = ""
         progressAlert.addButton(withTitle: "Cancel")
-        progressAlert.buttons.first?.isHidden = true
 
-        let indicator = NSProgressIndicator()
-        indicator.style = .spinning
-        indicator.controlSize = .small
-        indicator.startAnimation(nil)
-        indicator.sizeToFit()
-        progressAlert.accessoryView = indicator
+        let progressBar = NSProgressIndicator()
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 1
+        progressBar.doubleValue = 0
 
-        // Run download asynchronously
-        DispatchQueue.global().async { [weak self] in
-            guard let self else { return }
+        let statusLabel = NSTextField(labelWithString: "Establishing connection\u{2026}")
+        statusLabel.font = NSFont.systemFont(ofSize: 12)
+        statusLabel.textColor = .secondaryLabelColor
 
-            let abortUpdate = { [weak self] in
-                DispatchQueue.main.async {
-                    NSApp.stopModal()
-                    self?.showError("The update could not be installed. Please try again later.")
-                }
+        let stack = NSStackView(views: [progressBar, statusLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            progressBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+        ])
+        progressAlert.accessoryView = stack
+
+        // State shared between the download callbacks and the cancel handler
+        var isCancelled = false
+        var downloadSession: URLSession?
+        var downloadTask: URLSessionDownloadTask?
+        var activeMountPoint: String?
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-mcp-allower-update-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        let dmgPath = temporaryDirectory.appendingPathComponent("update.dmg")
+
+        let abortUpdate = { [weak self] in
+            DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                NSApp.stopModal()
+                self?.showError("The update could not be installed. Please try again later.")
             }
+        }
 
-            let temporaryDirectory = FileManager.default.temporaryDirectory
-                .appendingPathComponent("xcode-mcp-allower-update-\(UUID().uuidString)")
-            try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-            let dmgPath = temporaryDirectory.appendingPathComponent("update.dmg")
+        // Set up download delegate
+        let delegate = DownloadDelegate()
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        downloadSession = session
 
-            // Download DMG synchronously on background thread
-            var dmgData: Data?
-            let semaphore = DispatchSemaphore(value: 0)
-            URLSession.shared.dataTask(with: downloadURL) { data, _, _ in
-                dmgData = data
-                semaphore.signal()
-            }.resume()
-            semaphore.wait()
-
-            guard let dmgData else {
-                abortUpdate()
-                return
+        delegate.onProgress = { fraction in
+            DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                progressBar.doubleValue = fraction
+                statusLabel.stringValue = "Downloading\u{2026} \(Int(fraction * 100))%"
             }
+        }
 
+        delegate.onComplete = { [weak self] location in
+            guard let self, !isCancelled else { return }
+
+            // Copy downloaded file to our temp directory
             do {
-                try dmgData.write(to: dmgPath)
+                try FileManager.default.moveItem(at: location, to: dmgPath)
             } catch {
                 abortUpdate()
                 return
             }
 
+            DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                statusLabel.stringValue = "Preparing installation\u{2026}"
+            }
+
             // Mount the DMG
-            let mountTask = Process()
-            mountTask.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-            mountTask.arguments = ["attach", dmgPath.path, "-nobrowse", "-readonly", "-quiet"]
-            mountTask.standardOutput = FileHandle.nullDevice
-            mountTask.standardError = FileHandle.nullDevice
-            try? mountTask.run()
-            mountTask.waitUntilExit()
+            let mountProcess = Process()
+            mountProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            mountProcess.arguments = ["attach", dmgPath.path, "-nobrowse", "-readonly", "-quiet"]
+            mountProcess.standardOutput = FileHandle.nullDevice
+            mountProcess.standardError = FileHandle.nullDevice
+            try? mountProcess.run()
+            mountProcess.waitUntilExit()
+
+            guard !isCancelled else { return }
 
             // Find the .app in the mount point
             let volumesDirectory = "/Volumes"
@@ -1009,25 +1061,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             }
 
             var mountedAppPath: String?
-            var mountPoint: String?
             for volume in volumes {
                 let volumePath = "\(volumesDirectory)/\(volume)"
                 let candidateApp = "\(volumePath)/Xcode MCP Auto-Allower.app"
                 if FileManager.default.fileExists(atPath: candidateApp) {
                     mountedAppPath = candidateApp
-                    mountPoint = volumePath
+                    activeMountPoint = volumePath
                     break
                 }
             }
 
-            guard let sourceApp = mountedAppPath, let mount = mountPoint else {
+            guard let sourceApp = mountedAppPath, let mount = activeMountPoint else {
                 abortUpdate()
                 return
             }
 
+            guard !isCancelled else { return }
+
             // Spawn detached updater script
             let currentAppPath = Bundle.main.bundlePath
             let pid = ProcessInfo.processInfo.processIdentifier
+            let plistPath = launchAgentPlistPath()
             let script = """
                 while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
                 rm -rf \(self.shellQuote(currentAppPath))
@@ -1036,9 +1090,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 rm -rf \(self.shellQuote(temporaryDirectory.path))
                 sleep 0.5
                 open \(self.shellQuote(currentAppPath))
+                sleep 2
+                /bin/launchctl bootstrap gui/$(id -u) \(self.shellQuote(plistPath))
                 """
 
             DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                statusLabel.stringValue = "Quitting version \(appVersion)\u{2026}"
+                progressBar.doubleValue = 1
+
                 NSApp.stopModal()
 
                 let task = Process()
@@ -1048,11 +1108,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 task.standardError = FileHandle.nullDevice
                 try? task.run()
 
+                // Bootout LaunchAgent before terminating so KeepAlive doesn't restart us
+                run("/bin/launchctl", "bootout", "gui/\(getuid())/\(label)")
                 NSApp.terminate(nil)
             }
         }
 
-        progressAlert.runModal()
+        delegate.onError = {
+            guard !isCancelled else { return }
+            abortUpdate()
+        }
+
+        // Start download
+        let task = session.downloadTask(with: downloadURL)
+        downloadTask = task
+        task.resume()
+
+        // Block until the alert is dismissed (by Cancel button or stopModal)
+        let response = progressAlert.runModal()
+
+        // If we get here via the Cancel button, clean up
+        if response == .alertFirstButtonReturn {
+            isCancelled = true
+            downloadTask?.cancel()
+            downloadSession?.invalidateAndCancel()
+            if let mount = activeMountPoint {
+                run("/usr/bin/hdiutil", "detach", mount, "-quiet")
+            }
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
     }
 
     // MARK: Helpers
