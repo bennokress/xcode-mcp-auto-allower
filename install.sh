@@ -1,4 +1,9 @@
 #!/bin/bash
+# =============================================================================
+# install.sh — Development-only install script.
+# Compiles from source and installs locally without code signing.
+# For user-facing distribution, see ./scripts/build-dmg.sh instead.
+# =============================================================================
 set -euo pipefail
 
 LABEL="com.local.xcode-mcp-allower"
