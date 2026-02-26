@@ -19,6 +19,8 @@ let allowLabels: Set<String> = ["Allow", "Erlauben"]
 let denyLabels: Set<String> = ["Don\u{2019}t Allow", "Don't Allow", "Nicht erlauben"]
 
 func clickAllowIfPresent(in app: AXUIElement) {
+    if UserDefaults.standard.bool(forKey: "launchAgentPaused") { return }
+
     var windowsRef: CFTypeRef?
     let axResult = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef)
     guard axResult == .success, let windows = windowsRef as? [AXUIElement] else {
@@ -153,6 +155,28 @@ func launchAgentPlistPath() -> String {
     NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
 }
 
+func writeLaunchAgentPlist() {
+    let plistPath = launchAgentPlistPath()
+    guard let binaryPath = Bundle.main.executablePath else {
+        NSLog("[xcode-mcp-allower] Cannot determine executable path for LaunchAgent.")
+        return
+    }
+
+    let dir = (plistPath as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
+    let plist: [String: Any] = [
+        "Label": label,
+        "ProgramArguments": [binaryPath, "--background"],
+        "RunAtLoad": true,
+        "KeepAlive": true,
+        "AssociatedBundleIdentifiers": label,
+        "StandardOutPath": logFile,
+        "StandardErrorPath": logFile,
+    ]
+    (plist as NSDictionary).write(toFile: plistPath, atomically: true)
+}
+
 func ensureLaunchAgent() {
     let plistPath = launchAgentPlistPath()
     guard let binaryPath = Bundle.main.executablePath else {
@@ -170,21 +194,7 @@ func ensureLaunchAgent() {
 
     NSLog("[xcode-mcp-allower] Installing/updating LaunchAgent...")
 
-    // Ensure directory exists
-    let dir = (plistPath as NSString).deletingLastPathComponent
-    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-
-    // Write new plist
-    let plist: [String: Any] = [
-        "Label": label,
-        "ProgramArguments": [binaryPath, "--background"],
-        "RunAtLoad": true,
-        "KeepAlive": true,
-        "AssociatedBundleIdentifiers": label,
-        "StandardOutPath": logFile,
-        "StandardErrorPath": logFile,
-    ]
-    (plist as NSDictionary).write(toFile: plistPath, atomically: true)
+    writeLaunchAgentPlist()
 
     // Reload: bootout old (if any), then bootstrap new
     let uid = getuid()
@@ -207,6 +217,14 @@ func ensureLaunchAgent() {
     NSLog("[xcode-mcp-allower] LaunchAgent installed and loaded.")
 }
 
+// MARK: - LaunchAgent Status
+
+enum LaunchAgentStatus {
+    case running
+    case paused
+    case notFound
+}
+
 // MARK: - App Delegate
 
 @main
@@ -214,6 +232,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     var window: NSWindow?
     var accessibilityDot: NSView?
     var accessibilityLabel: NSTextField?
+    var launchAgentDot: NSView?
+    var launchAgentLabel: NSTextField?
+    var launchAgentDescription: NSTextField?
+    var pauseResumeButton: NSButton?
+    var resumeAfterRebootCheckbox: NSButton?
     var statusTimer: Timer?
     var updateCheckTimer: Timer?
     var pendingUpdateJSON: [String: Any]?
@@ -225,12 +248,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         set { UserDefaults.standard.set(newValue, forKey: "includeBetaUpdates") }
     }
 
+    var launchAgentPaused: Bool {
+        get { UserDefaults.standard.bool(forKey: "launchAgentPaused") }
+        set { UserDefaults.standard.set(newValue, forKey: "launchAgentPaused") }
+    }
+
+    var resumeAfterReboot: Bool {
+        get { UserDefaults.standard.bool(forKey: "resumeAfterReboot") }
+        set { UserDefaults.standard.set(newValue, forKey: "resumeAfterReboot") }
+    }
+
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         let isBackground = CommandLine.arguments.contains("--background")
         app.setActivationPolicy(isBackground ? .accessory : .regular)
         delegate.isBackgroundMode = isBackground
+        if isBackground {
+            delegate.launchAgentPaused = false
+        }
         app.delegate = delegate
         app.run()
     }
@@ -311,10 +347,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         }
     }
 
+    // MARK: Status Updates
+
+    func detectLaunchAgentStatus() -> LaunchAgentStatus {
+        if launchAgentPaused { return .paused }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = ["list", label]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+
+        return task.terminationStatus == 0 ? .running : .notFound
+    }
+
     func updateStatus() {
         let granted = AXIsProcessTrusted()
         accessibilityDot?.layer?.backgroundColor = (granted ? NSColor.systemGreen : NSColor.systemRed).cgColor
         accessibilityLabel?.stringValue = granted ? "Accessibility: Granted" : "Accessibility: Not Granted"
+
+        let laStatus = detectLaunchAgentStatus()
+        switch laStatus {
+        case .running:
+            launchAgentDot?.layer?.backgroundColor = NSColor.systemGreen.cgColor
+            launchAgentLabel?.stringValue = "LaunchAgent: Running"
+            launchAgentDescription?.stringValue = "The background watcher is active and will automatically approve Xcode\u{2019}s MCP permission dialogs."
+            pauseResumeButton?.title = "Pause"
+            pauseResumeButton?.isEnabled = true
+            resumeAfterRebootCheckbox?.isEnabled = true
+        case .paused:
+            launchAgentDot?.layer?.backgroundColor = NSColor.systemOrange.cgColor
+            launchAgentLabel?.stringValue = "LaunchAgent: Paused"
+            launchAgentDescription?.stringValue = "The background watcher is paused. Permission dialogs will not be approved automatically until resumed."
+            pauseResumeButton?.title = "Resume"
+            pauseResumeButton?.isEnabled = true
+            resumeAfterRebootCheckbox?.isEnabled = true
+        case .notFound:
+            launchAgentDot?.layer?.backgroundColor = NSColor.systemGray.cgColor
+            launchAgentLabel?.stringValue = "LaunchAgent: Not Found"
+            launchAgentDescription?.stringValue = "The background watcher is not installed. Click Reinstall to set it up again."
+            pauseResumeButton?.title = "Resume"
+            pauseResumeButton?.isEnabled = false
+            resumeAfterRebootCheckbox?.isEnabled = false
+        }
     }
 
     // MARK: Window Creation
@@ -417,6 +494,72 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         mainStack.addArrangedSubview(openSettingsBtn)
         mainStack.addArrangedSubview(makeSeparator())
 
+        // LaunchAgent status
+        let laDot = NSView()
+        laDot.wantsLayer = true
+        laDot.layer?.cornerRadius = 5
+        laDot.layer?.backgroundColor = NSColor.systemGray.cgColor
+        laDot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            laDot.widthAnchor.constraint(equalToConstant: 10),
+            laDot.heightAnchor.constraint(equalToConstant: 10),
+        ])
+        self.launchAgentDot = laDot
+
+        let laLabel = NSTextField(labelWithString: "LaunchAgent: Checking\u{2026}")
+        laLabel.font = NSFont.systemFont(ofSize: 13)
+        self.launchAgentLabel = laLabel
+
+        let laStatusRow = NSStackView()
+        laStatusRow.orientation = .horizontal
+        laStatusRow.alignment = .centerY
+        laStatusRow.spacing = 8
+        laStatusRow.addArrangedSubview(laDot)
+        laStatusRow.addArrangedSubview(laLabel)
+        mainStack.addArrangedSubview(laStatusRow)
+
+        let laDesc = NSTextField(wrappingLabelWithString: "Checking LaunchAgent status\u{2026}")
+        laDesc.font = NSFont.systemFont(ofSize: 12)
+        laDesc.textColor = .secondaryLabelColor
+        laDesc.preferredMaxLayoutWidth = textWidth
+        self.launchAgentDescription = laDesc
+        mainStack.addArrangedSubview(laDesc)
+
+        // Management buttons
+        let pauseBtn = NSButton(title: "Pause", target: self, action: #selector(togglePauseResume))
+        pauseBtn.bezelStyle = .rounded
+        self.pauseResumeButton = pauseBtn
+
+        let reinstallBtn = NSButton(title: "Reinstall LaunchAgent", target: self, action: #selector(reinstallLaunchAgent))
+        reinstallBtn.bezelStyle = .rounded
+
+        let manageSpacer = NSView()
+        manageSpacer.translatesAutoresizingMaskIntoConstraints = false
+        manageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let uninstallBtn = NSButton(title: "Uninstall", target: self, action: #selector(uninstall))
+        uninstallBtn.bezelStyle = .rounded
+        uninstallBtn.contentTintColor = .systemRed
+
+        let manageRow = NSStackView()
+        manageRow.orientation = .horizontal
+        manageRow.spacing = 8
+        manageRow.alignment = .centerY
+        manageRow.addArrangedSubview(pauseBtn)
+        manageRow.addArrangedSubview(reinstallBtn)
+        manageRow.addArrangedSubview(manageSpacer)
+        manageRow.addArrangedSubview(uninstallBtn)
+        manageRow.translatesAutoresizingMaskIntoConstraints = false
+        manageRow.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
+        mainStack.addArrangedSubview(manageRow)
+
+        let rebootCheckbox = NSButton(checkboxWithTitle: "Resume after system reboot",
+                                      target: self, action: #selector(rebootCheckboxChanged(_:)))
+        rebootCheckbox.state = resumeAfterReboot ? .on : .off
+        self.resumeAfterRebootCheckbox = rebootCheckbox
+        mainStack.addArrangedSubview(rebootCheckbox)
+        mainStack.addArrangedSubview(makeSeparator())
+
         // Update section
         let updateBtn = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdatesButtonClicked))
         updateBtn.bezelStyle = .rounded
@@ -434,35 +577,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         mainStack.addArrangedSubview(updateRow)
         mainStack.addArrangedSubview(makeSeparator())
 
-        // Management section
-        let reinstallBtn = NSButton(title: "Reinstall LaunchAgent", target: self, action: #selector(reinstallLaunchAgent))
-        reinstallBtn.bezelStyle = .rounded
-
-        let manageSpacer = NSView()
-        manageSpacer.translatesAutoresizingMaskIntoConstraints = false
-        manageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let uninstallBtn = NSButton(title: "Uninstall", target: self, action: #selector(uninstall))
-        uninstallBtn.bezelStyle = .rounded
-        uninstallBtn.contentTintColor = .systemRed
-
-        let manageRow = NSStackView()
-        manageRow.orientation = .horizontal
-        manageRow.spacing = 8
-        manageRow.alignment = .centerY
-        manageRow.addArrangedSubview(reinstallBtn)
-        manageRow.addArrangedSubview(manageSpacer)
-        manageRow.addArrangedSubview(uninstallBtn)
-        manageRow.translatesAutoresizingMaskIntoConstraints = false
-        manageRow.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
-        mainStack.addArrangedSubview(manageRow)
-        mainStack.addArrangedSubview(makeSeparator())
-
         // Footer link
-        let linkBtn = NSButton(title: githubURL, target: self, action: #selector(openGitHub))
+        let linkBtn = NSButton(title: "bennokress/xcode-mcp-auto-allower on GitHub",
+                               target: self, action: #selector(openGitHub))
         linkBtn.isBordered = false
         linkBtn.font = NSFont.systemFont(ofSize: 11)
         linkBtn.contentTintColor = .linkColor
+        if let ghImage = NSImage(named: "github.fill") {
+            ghImage.isTemplate = true
+            linkBtn.image = ghImage
+            linkBtn.imagePosition = .imageLeading
+        }
         mainStack.addArrangedSubview(linkBtn)
 
         // Layout
@@ -506,6 +631,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         checkForUpdates(silent: true)
     }
 
+    @objc func togglePauseResume() {
+        let status = detectLaunchAgentStatus()
+        if status == .running {
+            // Pause
+            let uid = getuid()
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            task.arguments = ["bootout", "gui/\(uid)/\(label)"]
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            try? task.run()
+            task.waitUntilExit()
+
+            launchAgentPaused = true
+
+            if !resumeAfterReboot {
+                try? FileManager.default.removeItem(atPath: launchAgentPlistPath())
+            }
+        } else {
+            // Resume
+            ensureLaunchAgent()
+            launchAgentPaused = false
+        }
+        updateStatus()
+    }
+
+    @objc func rebootCheckboxChanged(_ sender: NSButton) {
+        resumeAfterReboot = sender.state == .on
+
+        if launchAgentPaused {
+            if resumeAfterReboot {
+                writeLaunchAgentPlist()
+            } else {
+                try? FileManager.default.removeItem(atPath: launchAgentPlistPath())
+            }
+        }
+    }
+
     @objc func reinstallLaunchAgent() {
         let alert = NSAlert()
         alert.messageText = "Reinstall LaunchAgent?"
@@ -518,6 +681,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         let plistPath = launchAgentPlistPath()
         try? FileManager.default.removeItem(atPath: plistPath)
         ensureLaunchAgent()
+        launchAgentPaused = false
+        updateStatus()
         showInfo("Background watcher reinstalled successfully.")
     }
 
@@ -635,6 +800,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     // MARK: Update Check (Background)
 
     func checkForUpdatesInBackground() {
+        if launchAgentPaused { return }
+
         let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases")!
         URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             guard let self, error == nil,

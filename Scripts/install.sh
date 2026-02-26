@@ -24,10 +24,13 @@ mkdir -p "$BUILD_DIR"
 
 # Compile app icon from Icon Composer package via actool
 ICON_SRC="${REPO_DIR}/Assets/App Icon.icon"
+SYMBOLS_SRC="${REPO_DIR}/Assets/Symbols.xcassets"
 ICON_COMPILED=false
 if [ -d "$ICON_SRC" ]; then
     echo "    Compiling app icon..."
-    xcrun actool "$ICON_SRC" \
+    ACTOOL_ARGS=("$ICON_SRC")
+    [ -d "$SYMBOLS_SRC" ] && ACTOOL_ARGS+=("$SYMBOLS_SRC")
+    xcrun actool "${ACTOOL_ARGS[@]}" \
         --compile "$BUILD_DIR" \
         --output-partial-info-plist "${BUILD_DIR}/Icon-Info.plist" \
         --output-format human-readable-text \
