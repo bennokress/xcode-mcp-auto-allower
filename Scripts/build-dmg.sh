@@ -199,6 +199,11 @@ end tell
 ASEOF
 echo "    Window appearance configured."
 
+# Hide system dot-directories from users who have "Show hidden files" on
+for item in "${MOUNT_POINT}"/.??*; do
+    [ -e "$item" ] && chflags hidden "$item"
+done
+
 # Sync filesystem changes and unmount
 sync
 hdiutil detach "$MOUNT_POINT" -quiet
