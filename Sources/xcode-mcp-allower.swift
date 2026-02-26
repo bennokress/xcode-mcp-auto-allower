@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import UserNotifications
 
 // appVersion, githubRepo, githubURL are defined in the generated Version.swift
 
@@ -209,12 +210,19 @@ func ensureLaunchAgent() {
 // MARK: - App Delegate
 
 @main
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var window: NSWindow?
     var accessibilityDot: NSView?
     var accessibilityLabel: NSTextField?
     var statusTimer: Timer?
+    var updateCheckTimer: Timer?
+    var pendingUpdateJSON: [String: Any]?
     let textWidth: CGFloat = 432
+
+    var includeBetaUpdates: Bool {
+        get { UserDefaults.standard.bool(forKey: "includeBetaUpdates") }
+        set { UserDefaults.standard.set(newValue, forKey: "includeBetaUpdates") }
+    }
 
     static func main() {
         let app = NSApplication.shared
@@ -227,6 +235,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureLaunchAgent()
         startDaemon()
+
+        // Request notification permission
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().delegate = self
+
+        // Schedule background update checks every 24 hours
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 86400, repeats: true) { [weak self] _ in
+            self?.checkForUpdatesInBackground()
+        }
+
+        // Run an immediate background check
+        checkForUpdatesInBackground()
+
         if !CommandLine.arguments.contains("--background") {
             showWindow()
         }
@@ -240,6 +261,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    // MARK: UNUserNotificationCenterDelegate
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        showWindow()
+        if let json = pendingUpdateJSON {
+            showUpdateAlert(json: json)
+        }
+        completionHandler()
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    // MARK: Window Management
 
     func showWindow() {
         if window == nil { createWindow() }
@@ -318,7 +359,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         headerStack.addArrangedSubview(titleStack)
 
         mainStack.addArrangedSubview(headerStack)
-        mainStack.addArrangedSubview(makeSeparator())
 
         // Description
         let descLabel = NSTextField(wrappingLabelWithString:
@@ -328,7 +368,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         descLabel.font = NSFont.systemFont(ofSize: 13)
         descLabel.preferredMaxLayoutWidth = textWidth
         mainStack.addArrangedSubview(descLabel)
-        mainStack.addArrangedSubview(makeSeparator())
 
         // Accessibility status
         let axDot = NSView()
@@ -369,32 +408,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainStack.addArrangedSubview(openSettingsBtn)
         mainStack.addArrangedSubview(makeSeparator())
 
-        // Actions
+        // Update section
         let updateBtn = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdates))
         updateBtn.bezelStyle = .rounded
 
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let betaCheckbox = NSButton(checkboxWithTitle: "Include beta versions",
+                                    target: self, action: #selector(betaToggleChanged(_:)))
+        betaCheckbox.state = includeBetaUpdates ? .on : .off
 
+        let updateRow = NSStackView()
+        updateRow.orientation = .horizontal
+        updateRow.spacing = 12
+        updateRow.alignment = .centerY
+        updateRow.addArrangedSubview(updateBtn)
+        updateRow.addArrangedSubview(betaCheckbox)
+        mainStack.addArrangedSubview(updateRow)
+        mainStack.addArrangedSubview(makeSeparator())
+
+        // Management section
         let reinstallBtn = NSButton(title: "Reinstall LaunchAgent", target: self, action: #selector(reinstallLaunchAgent))
         reinstallBtn.bezelStyle = .rounded
+
+        let manageSpacer = NSView()
+        manageSpacer.translatesAutoresizingMaskIntoConstraints = false
+        manageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let uninstallBtn = NSButton(title: "Uninstall", target: self, action: #selector(uninstall))
         uninstallBtn.bezelStyle = .rounded
         uninstallBtn.contentTintColor = .systemRed
 
-        let actionsRow = NSStackView()
-        actionsRow.orientation = .horizontal
-        actionsRow.spacing = 8
-        actionsRow.alignment = .centerY
-        actionsRow.addArrangedSubview(updateBtn)
-        actionsRow.addArrangedSubview(spacer)
-        actionsRow.addArrangedSubview(reinstallBtn)
-        actionsRow.addArrangedSubview(uninstallBtn)
-        actionsRow.translatesAutoresizingMaskIntoConstraints = false
-        actionsRow.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
-        mainStack.addArrangedSubview(actionsRow)
+        let manageRow = NSStackView()
+        manageRow.orientation = .horizontal
+        manageRow.spacing = 8
+        manageRow.alignment = .centerY
+        manageRow.addArrangedSubview(reinstallBtn)
+        manageRow.addArrangedSubview(manageSpacer)
+        manageRow.addArrangedSubview(uninstallBtn)
+        manageRow.translatesAutoresizingMaskIntoConstraints = false
+        manageRow.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
+        mainStack.addArrangedSubview(manageRow)
         mainStack.addArrangedSubview(makeSeparator())
 
         // Footer link
@@ -438,6 +490,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func openGitHub() {
         NSWorkspace.shared.open(URL(string: githubURL)!)
+    }
+
+    @objc func betaToggleChanged(_ sender: NSButton) {
+        includeBetaUpdates = sender.state == .on
+        checkForUpdates()
     }
 
     @objc func reinstallLaunchAgent() {
@@ -512,62 +569,113 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
+    // MARK: Update Check (Interactive)
+
     @objc func checkForUpdates() {
-        let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases/latest")!
+        let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases")!
         URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self else { return }
 
-                if let error {
-                    self.showError("Could not check for updates:\n\(error.localizedDescription)")
+                if let _ = error {
+                    self.showError("Unable to check for updates. Please check your internet connection.")
                     return
                 }
-
-                let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
 
                 guard let data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let tagName = json["tag_name"] as? String else {
-                    if httpStatus == 404 {
-                        self.showInfo("No releases published yet. You have the latest code.")
-                    } else {
-                        self.showError("Could not read update information from GitHub.")
-                    }
+                      let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                    self.showError("Unable to check for updates. Please try again later.")
                     return
                 }
 
+                guard let json = self.firstMatchingRelease(from: releases) else {
+                    self.showInfo("You\u{2019}re on the latest version (\(appVersion)).")
+                    return
+                }
+
+                let tagName = json["tag_name"] as? String ?? ""
                 let latest = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
 
                 if isNewerVersion(latest, than: appVersion) {
-                    let a = NSAlert()
-                    a.messageText = "Update Available"
-                    a.informativeText = "Version \(latest) is available (you have \(appVersion)). Update now?"
-                    a.addButton(withTitle: "Update")
-                    a.addButton(withTitle: "Later")
-                    if a.runModal() == .alertFirstButtonReturn {
-                        self.performUpdate(json: json)
-                    }
+                    self.showUpdateAlert(json: json)
                 } else {
-                    self.showInfo("You\u{2019}re up to date! Version \(appVersion) is the latest.")
+                    self.showInfo("You\u{2019}re on the latest version (\(appVersion)).")
                 }
             }
         }.resume()
     }
 
+    func showUpdateAlert(json: [String: Any]) {
+        let tagName = json["tag_name"] as? String ?? ""
+        let latest = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+
+        let a = NSAlert()
+        a.messageText = "Update Available"
+        a.informativeText = "A new version is available.\n\nInstalled: \(appVersion)\nAvailable: \(latest)"
+        a.addButton(withTitle: "Update")
+        a.addButton(withTitle: "Later")
+        if a.runModal() == .alertFirstButtonReturn {
+            self.performUpdate(json: json)
+        }
+    }
+
+    // MARK: Update Check (Background)
+
+    func checkForUpdatesInBackground() {
+        let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases")!
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self, error == nil,
+                  let data,
+                  let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let json = self.firstMatchingRelease(from: releases) else { return }
+
+            let tagName = json["tag_name"] as? String ?? ""
+            let latest = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+
+            guard isNewerVersion(latest, than: appVersion) else { return }
+
+            self.pendingUpdateJSON = json
+
+            let content = UNMutableNotificationContent()
+            content.title = "Update Available"
+            content.body = "\(latest) is ready to install."
+            content.sound = .default
+
+            let request = UNNotificationRequest(identifier: "update-available", content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }.resume()
+    }
+
+    // MARK: Release Filtering
+
+    func firstMatchingRelease(from releases: [[String: Any]]) -> [String: Any]? {
+        for release in releases {
+            if release["draft"] as? Bool == true { continue }
+            if !includeBetaUpdates && release["prerelease"] as? Bool == true { continue }
+            return release
+        }
+        return nil
+    }
+
+    // MARK: Update Installation
+
     func performUpdate(json: [String: Any]) {
+        let tagName = json["tag_name"] as? String ?? ""
+        let latest = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+
         // Find the .dmg asset URL from the release JSON
         guard let assets = json["assets"] as? [[String: Any]],
               let dmgAsset = assets.first(where: { ($0["name"] as? String ?? "").hasSuffix(".dmg") }),
               let downloadURLString = dmgAsset["browser_download_url"] as? String,
               let downloadURL = URL(string: downloadURLString) else {
-            showError("No DMG found in the latest release.\n\nDownload manually from:\n\(githubURL)/releases")
+            showError("This update isn\u{2019}t available for download yet. Please try again later.")
             return
         }
 
         // Show progress
         let progressAlert = NSAlert()
         progressAlert.messageText = "Downloading Update..."
-        progressAlert.informativeText = "Please wait while the update is downloaded."
+        progressAlert.informativeText = "Installing \(latest) \u{2014} this may take a moment."
         progressAlert.addButton(withTitle: "Cancel")
         progressAlert.buttons.first?.isHidden = true
 
@@ -591,7 +699,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let dmgData = try? Data(contentsOf: downloadURL) else {
                 DispatchQueue.main.async {
                     NSApp.stopModal()
-                    self.showError("Failed to download update.")
+                    self.showError("The update could not be installed. Please try again later.")
                 }
                 return
             }
@@ -601,7 +709,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } catch {
                 DispatchQueue.main.async {
                     NSApp.stopModal()
-                    self.showError("Failed to save update: \(error.localizedDescription)")
+                    self.showError("The update could not be installed. Please try again later.")
                 }
                 return
             }
@@ -616,12 +724,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mountTask.waitUntilExit()
 
             // Find the .app in the mount point
-            // The volume name matches the app name from the DMG
             let volumesDir = "/Volumes"
             guard let volumes = try? FileManager.default.contentsOfDirectory(atPath: volumesDir) else {
                 DispatchQueue.main.async {
                     NSApp.stopModal()
-                    self.showError("Failed to mount update DMG.")
+                    self.showError("The update could not be installed. Please try again later.")
                 }
                 return
             }
@@ -641,7 +748,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let sourceApp = mountedAppPath, let mount = mountPoint else {
                 DispatchQueue.main.async {
                     NSApp.stopModal()
-                    self.showError("Could not find the app in the downloaded DMG.")
+                    self.showError("The update could not be installed. Please try again later.")
                 }
                 return
             }
