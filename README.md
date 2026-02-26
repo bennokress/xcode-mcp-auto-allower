@@ -1,100 +1,81 @@
 # Xcode MCP Auto-Allower
 
-A lightweight macOS daemon that automatically approves Xcode's MCP permission dialogs — for any AI coding assistant.
+Are you annoyed by this permission dialog already?
 
-## The Problem
+<p align="center">
+  <img src="Assets/permission-dialog.png" alt="Xcode MCP permission dialog asking to allow an agent to access Xcode" width="320">
+</p>
 
-Xcode 26.3 introduced MCP server support, but every connection attempt triggers a permission dialog that must be manually approved. If you're using AI coding tools (Claude Code, GitHub Copilot, Cursor, Windsurf, etc.) that connect via MCP, these dialogs pop up constantly and break your flow.
+Every time an AI coding assistant connects to Xcode via MCP, this dialog pops up and interrupts your flow. **Xcode MCP Auto-Allower** takes care of it by automatically clicking "Allow" for you. Every single time, in the background, without you having to do anything.
 
-## The Solution
-
-This daemon uses `AXObserver` to watch for Xcode's MCP permission dialogs and automatically clicks "Allow". Detection works by matching the dialog's body text (must contain "Xcode") combined with the button pattern ("Allow" + "Don't Allow") — the exact signature of MCP permission sheets. Since the dialog text is identical across all MCP agents (only the tool name varies), this works universally without hard-coding agent names.
-
-The daemon is fully event-driven via Accessibility notifications — no polling, no timers, virtually zero resource usage while idle.
-
-## Requirements
-
-- macOS 26 (Tahoe)
-- Xcode 26.3+
-
-## Install
+## Installation
 
 1. Download the latest DMG from [Releases](https://github.com/bennokress/xcode-mcp-auto-allower/releases)
 2. Open the DMG and drag **Xcode MCP Auto-Allower** to `/Applications`
 3. Launch the app once
 4. Grant **Accessibility** permission when prompted (System Settings > Privacy & Security > Accessibility)
 
-That's it — the daemon installs its LaunchAgent automatically and runs on every login.
+## Features
 
-## Management Window
+**Automatically allowing MCP connection requests** is activated right after the installation steps above. It **stays active forever** and **doesn't require the app to be opened**. It even **survives reboots** of macOS, because the app registers a LaunchAgent in the system that runs silently in the background.
 
-Open **Xcode MCP Auto-Allower** from `/Applications` (or Spotlight) to access:
+If you ever want to see connection requests again, you have two options: **Pause the agent temporarily** and resume it whenever you're ready, or **pause it indefinitely** by unchecking the "Resume after system reboot" option while paused. This way it won't come back until you manually resume it. You can also **uninstall the app** entirely, which automatically removes the LaunchAgent from the system along with all related files.
 
-- **Accessibility status** — live indicator showing whether the permission is granted
-- **Open Accessibility Settings** — deep-links to the right pane
-- **Check for Updates** — queries the GitHub Releases API, downloads and installs the latest DMG
-- **Reinstall LaunchAgent** — rewrites and reloads the LaunchAgent (troubleshooting)
-- **Uninstall** — stops the daemon and removes the app, LaunchAgent, and all related files
+Both pausing and uninstalling can be done from the app's main window. The window also shows **status indicators** for the Accessibility permission and the LaunchAgent registration, so you can tell at a glance if everything is working correctly. If something seems off, you have the option to **reinstall the LaunchAgent** with a single click. The app also supports **automatic update checks** and lets you **include beta versions** if you want to stay on the cutting edge.
 
-The daemon runs silently via the LaunchAgent. The management window only appears when you explicitly open the app — it uses `NSApp.setActivationPolicy(.accessory)` so it stays out of the Dock.
+<p align="center">
+  <img src="Assets/main-window.png" alt="Xcode MCP Auto-Allower main window showing status indicators and controls" width="480">
+</p>
 
-## Auto-Update
+## Technical Details
 
-The app checks [github.com/bennokress/xcode-mcp-auto-allower/releases](https://github.com/bennokress/xcode-mcp-auto-allower/releases) for new versions tagged with semver (e.g. `v1.1.0`). Updates download the latest DMG, swap the app in place, and relaunch automatically.
+The app is a lightweight macOS daemon written in pure Swift (~900 lines, no external dependencies). It uses the macOS Accessibility framework to detect and dismiss Xcode's MCP permission dialogs in a fully event-driven way. There is no polling and no timers, resulting in virtually zero resource usage while idle.
 
-## Uninstall
+### How the Auto-Allow Works
 
-From the management window, click **Uninstall**. This removes the app bundle, LaunchAgent, log file, config, and resets the Accessibility TCC entry.
+1. The daemon monitors running applications via `NSWorkspace` notifications and attaches an `AXObserver` to each Xcode process (matched by bundle ID `com.apple.dt.Xcode`, which covers stable and beta versions alike)
+2. The observer listens for `kAXWindowCreatedNotification` and `kAXFocusedWindowChangedNotification`
+3. When a notification fires, the daemon scans the window's children for `AXStaticText` (body) and `AXButton` elements
+4. If the body text contains "Xcode" **and** the window has both an "Allow" and a "Don't Allow" button, it's identified as an MCP permission dialog
+5. The daemon calls `AXUIElementPerformAction(kAXPressAction)` on the "Allow" button
 
-## How It Works
+The dialog text is identical across all MCP agents (only the tool name varies), so this detection works universally without hard-coding agent names.
 
-1. The daemon registers an `AXObserver` on each running Xcode process (matched by bundle ID `com.apple.dt.Xcode`)
-2. It listens for `kAXWindowCreatedNotification` and `kAXFocusedWindowChangedNotification`
-3. When fired, it scans the window's `AXChildren` for `AXStaticText` (body) and `AXButton` elements
-4. If the body text contains "Xcode" **and** the window has both an "Allow" and a "Don't Allow" button — it's an MCP permission dialog
-5. It calls `AXUIElementPerformAction(kAXPressAction)` on the "Allow" button
-6. Observers are attached/detached dynamically as Xcode launches/terminates via `NSWorkspace` notifications
+### LaunchAgent
 
-All Xcode variants (stable, betas like `Xcode-26.3.0.app`) share the bundle ID `com.apple.dt.Xcode`, so they're all handled.
+The daemon runs via a LaunchAgent plist at `~/Library/LaunchAgents/com.bennokress.xcode-mcp-allower.plist`. It is configured with `RunAtLoad: true` (starts on login) and `KeepAlive: true` (respawns if the process crashes). The app binary is launched with a `--background` flag, which sets the activation policy to `.accessory` so it stays out of the Dock.
 
-## Supported Languages
+## Troubleshooting
 
-The daemon matches these localized button labels:
+### Want to See Logs?
 
-| Language | Allow    | Don't Allow      |
-|----------|----------|------------------|
-| English  | Allow    | Don't Allow      |
-| German   | Erlauben | Nicht erlauben   |
-
-To add more languages, edit the `allowLabels` / `denyLabels` sets at the top of [`Sources/xcode-mcp-allower.swift`](Sources/xcode-mcp-allower.swift).
-
-## Logs
+The daemon logs to `~/Library/Logs/xcode-mcp-allower.log`. You can follow the log in real-time:
 
 ```bash
 tail -f ~/Library/Logs/xcode-mcp-allower.log
 ```
 
-## App Icon
+Typical log entries include Xcode launch/termination events, observer attachment, dialog detection, and the result of clicking the Allow button.
 
-The app icon is an Xcode 26 Icon Composer package (`Assets/App Icon.icon/`). During build, `actool` compiles it into `Assets.car` with Liquid Glass rendering. To customize, edit the `.icon` package in Icon Composer and rebuild.
+### App Not Visible in Accessibility Settings?
 
-## Troubleshooting
+Open the app once. On first launch it calls `AXIsProcessTrustedWithOptions` with the prompt option, which pre-registers the app in System Settings > Privacy & Security > Accessibility. You just need to flip the toggle to ON. If the entry still doesn't appear, try removing the app from `/Applications`, re-copying it from the DMG, and launching it again.
 
-**Daemon not running?**
+### Daemon Not Running?
+
+Check whether the LaunchAgent is loaded:
+
 ```bash
 launchctl list | grep xcode-mcp-allower
 ```
-If no PID is shown, open the app and click **Reinstall LaunchAgent**, or check the log file for errors.
 
-**Accessibility not granted?**
-Open the app — the status indicator shows live permission state with a direct link to the settings pane.
-
-**Dialog not being clicked?**
-Check the log. If a dialog is detected but no button matches, add your language's "Allow"/"Don't Allow" equivalents to the label sets in the source.
+If no PID is shown, open the app and click **Reinstall LaunchAgent**. This deletes the existing plist, writes a fresh one pointing to the current app binary, and reloads it via `launchctl bootstrap`. You can also check the log file for error messages that might indicate the cause.
 
 ## Development
 
-For local development (compiles from source, no signing):
+### Local Development
+
+For local development the app compiles from source without code signing:
 
 ```bash
 git clone https://github.com/bennokress/xcode-mcp-auto-allower.git
@@ -102,9 +83,11 @@ cd xcode-mcp-auto-allower
 ./Scripts/install.sh
 ```
 
-Requires Xcode Command Line Tools (`xcode-select --install`).
+This compiles the icon assets and Swift sources, creates an `.app` bundle at `~/Applications/Xcode MCP Auto-Allower.app`, writes the LaunchAgent plist, and loads the daemon. Requires Xcode Command Line Tools (`xcode-select --install`).
 
-### Building a Release DMG
+### Creating Your Own DMG File
+
+To build a signed and notarized DMG for distribution:
 
 ```bash
 # Set signing & notarization credentials
@@ -116,7 +99,7 @@ export APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"  # or @keychain:notarytool
 ./Scripts/build-dmg.sh
 ```
 
-The signed + notarized DMG is output to `Distribution/`.
+Alternatively, if you have a local keychain profile set up (`xcrun notarytool store-credentials "notarytool"`), the script will auto-detect it and you only need to run `./Scripts/build-dmg.sh`. The signed and notarized DMG is output to `Distribution/`.
 
 ---
 
