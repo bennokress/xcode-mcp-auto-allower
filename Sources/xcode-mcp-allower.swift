@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import SwiftUI
 import UserNotifications
 
 /// `appVersion`, `githubRepo`, and `githubURL` are defined in the build-generated `Version.swift`.
@@ -7,7 +8,7 @@ import UserNotifications
 // MARK: - Constants
 
 /// The LaunchAgent bundle identifier used for launchctl registration and plist naming.
-let label = "com.local.xcode-mcp-allower"
+let label = "com.bennokress.xcode-mcp-allower"
 
 /// The bundle identifier used to identify Xcode in running application queries.
 let xcodeBundleID = "com.apple.dt.Xcode"
@@ -285,6 +286,355 @@ enum LaunchAgentStatus {
     case notFound
 }
 
+// MARK: - Update Progress UI
+
+/// Observable model driving the update progress view during downloads.
+@Observable
+class UpdateProgress {
+    var progress: Double = 0
+    var status: String = "Establishing connection\u{2026}"
+}
+
+/// SwiftUI view showing a tinted progress bar and status label for the update alert.
+struct UpdateProgressView: View {
+    var model: UpdateProgress
+
+    var body: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.accentColor.opacity(0.2))
+                    if model.progress > 0 {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.accentColor)
+                            .frame(width: max(6, geo.size.width * model.progress))
+                    }
+                }
+            }
+            .frame(height: 6)
+
+            Text(model.status)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+// MARK: - Active Alert
+
+/// Describes the alert currently presented in the settings window.
+enum ActiveAlert: Identifiable {
+    case error(String)
+    case info(String)
+    case reinstallConfirmation
+    case uninstallConfirmation
+    case updateAvailable(String)
+
+    var id: String {
+        switch self {
+        case .error: "error"
+        case .info: "info"
+        case .reinstallConfirmation: "reinstall"
+        case .uninstallConfirmation: "uninstall"
+        case .updateAvailable: "update"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .error: "Error"
+        case .info: "Xcode MCP Auto-Allower"
+        case .reinstallConfirmation: "Reinstall LaunchAgent?"
+        case .uninstallConfirmation: "Uninstall Xcode MCP Auto-Allower?"
+        case .updateAvailable: "Update Available"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .error(let msg), .info(let msg): msg
+        case .reinstallConfirmation: "Use this if the background watcher isn\u{2019}t running correctly."
+        case .uninstallConfirmation: "This will remove the app and all related data from your Mac."
+        case .updateAvailable(let version): "A new version is available.\n\nInstalled: \(appVersion)\nAvailable: \(version)"
+        }
+    }
+}
+
+// MARK: - App State
+
+/// Centralized observable state driving the settings window UI.
+@Observable
+class AppState {
+    var isAccessibilityGranted = false
+    var launchAgentStatus: LaunchAgentStatus = .notFound
+    var activeAlert: ActiveAlert?
+
+    /// Binding helper for SwiftUI `.alert(isPresented:)`.
+    var isAlertPresented: Bool {
+        get { activeAlert != nil }
+        set { if !newValue { activeAlert = nil } }
+    }
+
+    /// Action closures wired by AppDelegate with `[weak self]` captures.
+    var togglePauseResume: () -> Void = {}
+    var reinstallLaunchAgent: () -> Void = {}
+    var uninstall: () -> Void = {}
+    var checkForUpdates: () -> Void = {}
+    var performUpdate: () -> Void = {}
+    var rebootCheckboxChanged: (Bool) -> Void = { _ in }
+    var betaToggleChanged: (Bool) -> Void = { _ in }
+
+    /// Polls accessibility and LaunchAgent status from the system.
+    func refreshStatus() {
+        isAccessibilityGranted = AXIsProcessTrusted()
+        let paused = UserDefaults.standard.bool(forKey: "launchAgentPaused")
+        if paused {
+            launchAgentStatus = .paused
+        } else {
+            launchAgentStatus = run("/bin/launchctl", "list", label) == 0 ? .running : .notFound
+        }
+    }
+}
+
+// MARK: - Settings View
+
+/// A small circle used as a status indicator.
+struct StatusDot: View {
+    let color: Color
+    var body: some View {
+        Circle().fill(color).frame(width: 10, height: 10)
+    }
+}
+
+/// The main settings window content.
+struct SettingsView: View {
+    @Bindable var appState: AppState
+    @AppStorage("includeBetaUpdates") private var includeBetaUpdates = false
+    @AppStorage("resumeAfterReboot") private var resumeAfterReboot = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            headerSection
+            descriptionSection
+            Divider()
+            accessibilitySection
+            Divider()
+            launchAgentSection
+            managementSection
+            Divider()
+            updateSection
+            Divider()
+            actionsSection
+        }
+        .padding(24)
+        .frame(width: 480, alignment: .leading)
+        .task {
+            while !Task.isCancelled {
+                appState.refreshStatus()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        .onAppear { appState.refreshStatus() }
+        .alert(
+            appState.activeAlert?.title ?? "",
+            isPresented: $appState.isAlertPresented,
+            presenting: appState.activeAlert
+        ) { alert in
+            alertActions(for: alert)
+        } message: { alert in
+            Text(alert.message)
+        }
+    }
+
+    // MARK: Sections
+
+    private var headerSection: some View {
+        HStack(spacing: 16) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 64, height: 64)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Xcode MCP Auto-Allower")
+                    .font(.system(size: 20, weight: .semibold))
+                Text("Benno Kress \u{2022} Version \(appVersion)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var descriptionSection: some View {
+        Text("This app automatically approves Xcode\u{2019}s MCP permission dialogs " +
+             "when AI coding assistants connect, so you don\u{2019}t have to " +
+             "click \u{201C}Allow\u{201D} every single time.")
+            .font(.system(size: 13))
+    }
+
+    private var accessibilitySection: some View {
+        Group {
+            HStack(spacing: 8) {
+                StatusDot(color: appState.isAccessibilityGranted ? .green : .red)
+                Text(appState.isAccessibilityGranted ? "Accessibility: Granted" : "Accessibility: Not Granted")
+                    .font(.system(size: 13))
+            }
+
+            Text("This app needs Accessibility access in System Settings to detect and " +
+                 "click Xcode\u{2019}s permission dialogs automatically. If the status " +
+                 "above shows \u{201C}Not Granted\u{201D}, click the button below.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            Button("Open Accessibility Settings") {
+                NSWorkspace.shared.open(
+                    URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            }
+        }
+    }
+
+    private var launchAgentSection: some View {
+        Group {
+            HStack(spacing: 8) {
+                StatusDot(color: launchAgentDotColor)
+                Text(launchAgentLabelText)
+                    .font(.system(size: 13))
+            }
+
+            Text(launchAgentDescriptionText)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var managementSection: some View {
+        HStack(spacing: 12) {
+            Button(appState.launchAgentStatus == .running ? "Pause" : "Resume") {
+                appState.togglePauseResume()
+            }
+            .disabled(appState.launchAgentStatus == .notFound)
+
+            Toggle("Resume after system reboot", isOn: $resumeAfterReboot)
+                .toggleStyle(.checkbox)
+                .disabled(appState.launchAgentStatus == .notFound)
+                .onChange(of: resumeAfterReboot) { _, newValue in
+                    appState.rebootCheckboxChanged(newValue)
+                }
+        }
+    }
+
+    private var updateSection: some View {
+        Group {
+            HStack(spacing: 8) {
+                Image("github.fill")
+                    .renderingMode(.template)
+                    .font(.system(size: 10))
+                    .frame(width: 10, height: 10)
+                Text("Updates")
+                    .font(.system(size: 13))
+            }
+
+            Text("This app is maintained on [GitHub by Benno Kress](https://github.com/\(githubRepo)). It checks for updates once per day automatically as long as the LaunchAgent is running, but you can trigger a check manually using the button below.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button("Check for Updates") { appState.checkForUpdates() }
+                Toggle("Include beta versions", isOn: $includeBetaUpdates)
+                    .toggleStyle(.checkbox)
+                    .onChange(of: includeBetaUpdates) { _, newValue in
+                        appState.betaToggleChanged(newValue)
+                    }
+            }
+        }
+    }
+
+    private var actionsSection: some View {
+        HStack(spacing: 8) {
+            Button("Reinstall LaunchAgent") {
+                appState.activeAlert = .reinstallConfirmation
+            }
+
+            Spacer()
+
+            Button("Uninstall") {
+                appState.activeAlert = .uninstallConfirmation
+            }
+            .tint(.red)
+        }
+    }
+
+    // MARK: Helpers
+
+    private var launchAgentDotColor: Color {
+        switch appState.launchAgentStatus {
+        case .running: .green
+        case .paused: .orange
+        case .notFound: .gray
+        }
+    }
+
+    private var launchAgentLabelText: String {
+        switch appState.launchAgentStatus {
+        case .running: "LaunchAgent: Running"
+        case .paused: "LaunchAgent: Paused"
+        case .notFound: "LaunchAgent: Not Found"
+        }
+    }
+
+    private var launchAgentDescriptionText: String {
+        switch appState.launchAgentStatus {
+        case .running:
+            "The background watcher is active and will automatically approve Xcode\u{2019}s MCP permission dialogs."
+        case .paused:
+            "The background watcher is paused. Permission dialogs will not be approved automatically until resumed."
+        case .notFound:
+            "The background watcher is not installed. Click Reinstall to set it up again."
+        }
+    }
+
+    @ViewBuilder
+    private func alertActions(for alert: ActiveAlert) -> some View {
+        switch alert {
+        case .error, .info:
+            Button("OK") {}
+        case .reinstallConfirmation:
+            Button("Reinstall") { appState.reinstallLaunchAgent() }
+            Button("Cancel", role: .cancel) {}
+        case .uninstallConfirmation:
+            Button("Uninstall", role: .destructive) { appState.uninstall() }
+            Button("Cancel", role: .cancel) {}
+        case .updateAvailable:
+            Button("Update") { appState.performUpdate() }
+            Button("Later", role: .cancel) {}
+        }
+    }
+}
+
+// MARK: - Download Delegate
+
+/// Bridges `URLSessionDownloadDelegate` callbacks to closures for progress tracking and completion handling.
+class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    var onProgress: ((Double) -> Void)?
+    var onComplete: ((URL) -> Void)?
+    var onError: (() -> Void)?
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        onProgress?(fraction)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        onComplete?(location)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard error != nil else { return }
+        onError?()
+    }
+}
+
 // MARK: - App Delegate
 
 /// The main application delegate handling window management, daemon lifecycle, and updates.
@@ -294,14 +644,6 @@ enum LaunchAgentStatus {
 @main
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var window: NSWindow?
-    var accessibilityDot: NSView?
-    var accessibilityLabel: NSTextField?
-    var launchAgentDot: NSView?
-    var launchAgentLabel: NSTextField?
-    var launchAgentDescription: NSTextField?
-    var pauseResumeButton: NSButton?
-    var resumeAfterRebootCheckbox: NSButton?
-    var statusTimer: Timer?
     var updateCheckTimer: Timer?
 
     /// Stores the release JSON from a background update check so it can be shown when the user taps the notification.
@@ -310,8 +652,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     /// Whether the app was launched with `--background` as a headless daemon.
     var isBackgroundMode: Bool = false
 
-    /// The maximum text width used for wrapping labels and separator constraints.
-    let textWidth: CGFloat = 432
+    /// The centralized UI state model observed by the SwiftUI settings view.
+    let appState = AppState()
 
     /// Whether beta (prerelease) versions should be included in update checks. Persisted in UserDefaults.
     var includeBetaUpdates: Bool {
@@ -351,6 +693,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         ensureLaunchAgent()
         startDaemon()
 
+        // Wire SwiftUI action closures
+        appState.togglePauseResume = { [weak self] in self?.togglePauseResume() }
+        appState.reinstallLaunchAgent = { [weak self] in self?.doReinstallLaunchAgent() }
+        appState.uninstall = { [weak self] in self?.doUninstall() }
+        appState.checkForUpdates = { [weak self] in self?.checkForUpdates(silent: false) }
+        appState.performUpdate = { [weak self] in
+            guard let self, let json = self.pendingUpdateJSON else { return }
+            self.performUpdate(json: json)
+        }
+        appState.rebootCheckboxChanged = { [weak self] newValue in
+            self?.handleRebootCheckboxChanged(newValue)
+        }
+        appState.betaToggleChanged = { [weak self] newValue in
+            self?.includeBetaUpdates = newValue
+            self?.checkForUpdates(silent: true)
+        }
+
         // Request notification permission
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         UNUserNotificationCenter.current().delegate = self
@@ -387,7 +746,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         showWindow()
         if let json = pendingUpdateJSON {
-            showUpdateAlert(json: json)
+            let latest = releaseVersion(from: json)
+            appState.activeAlert = .updateAvailable(latest)
         }
         completionHandler()
     }
@@ -400,76 +760,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     // MARK: Window Management
 
-    /// Creates the settings window if needed, brings it to front, and starts the status polling timer.
+    /// Creates the settings window if needed and brings it to front.
     func showWindow() {
         if window == nil { createWindow() }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        updateStatus()
-        startStatusTimer()
     }
 
     func windowWillClose(_ notification: Notification) {
-        statusTimer?.invalidate()
-        statusTimer = nil
         if isBackgroundMode {
             NSApp.setActivationPolicy(.accessory)
         }
     }
 
-    /// Starts (or restarts) the timer that polls accessibility and LaunchAgent status every 2 seconds.
-    func startStatusTimer() {
-        statusTimer?.invalidate()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.updateStatus()
-        }
-    }
-
-    // MARK: Status Updates
-
-    /// Queries launchctl to determine the current state of the LaunchAgent.
-    /// - Returns: The current ``LaunchAgentStatus``.
-    func detectLaunchAgentStatus() -> LaunchAgentStatus {
-        if launchAgentPaused { return .paused }
-        return run("/bin/launchctl", "list", label) == 0 ? .running : .notFound
-    }
-
-    /// Refreshes the accessibility and LaunchAgent status indicators in the UI.
-    func updateStatus() {
-        let granted = AXIsProcessTrusted()
-        accessibilityDot?.layer?.backgroundColor = (granted ? NSColor.systemGreen : NSColor.systemRed).cgColor
-        accessibilityLabel?.stringValue = granted ? "Accessibility: Granted" : "Accessibility: Not Granted"
-
-        let launchAgentStatus = detectLaunchAgentStatus()
-        switch launchAgentStatus {
-        case .running:
-            launchAgentDot?.layer?.backgroundColor = NSColor.systemGreen.cgColor
-            launchAgentLabel?.stringValue = "LaunchAgent: Running"
-            launchAgentDescription?.stringValue = "The background watcher is active and will automatically approve Xcode\u{2019}s MCP permission dialogs."
-            pauseResumeButton?.title = "Pause"
-            pauseResumeButton?.isEnabled = true
-            resumeAfterRebootCheckbox?.isEnabled = true
-        case .paused:
-            launchAgentDot?.layer?.backgroundColor = NSColor.systemOrange.cgColor
-            launchAgentLabel?.stringValue = "LaunchAgent: Paused"
-            launchAgentDescription?.stringValue = "The background watcher is paused. Permission dialogs will not be approved automatically until resumed."
-            pauseResumeButton?.title = "Resume"
-            pauseResumeButton?.isEnabled = true
-            resumeAfterRebootCheckbox?.isEnabled = true
-        case .notFound:
-            launchAgentDot?.layer?.backgroundColor = NSColor.systemGray.cgColor
-            launchAgentLabel?.stringValue = "LaunchAgent: Not Found"
-            launchAgentDescription?.stringValue = "The background watcher is not installed. Click Reinstall to set it up again."
-            pauseResumeButton?.title = "Resume"
-            pauseResumeButton?.isEnabled = false
-            resumeAfterRebootCheckbox?.isEnabled = false
-        }
-    }
-
     // MARK: Window Creation
 
-    /// Builds the settings window UI programmatically using stack views.
+    /// Creates the settings window with a SwiftUI content view.
     func createWindow() {
+        let hostingView = NSHostingView(rootView: SettingsView(appState: appState))
         let newWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
             styleMask: [.titled, .closable],
@@ -479,266 +787,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         newWindow.title = "Xcode MCP Auto-Allower"
         newWindow.isReleasedWhenClosed = false
         newWindow.delegate = self
-
-        let mainStack = NSStackView()
-        mainStack.orientation = .vertical
-        mainStack.alignment = .leading
-        mainStack.spacing = 16
-        mainStack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
-        mainStack.translatesAutoresizingMaskIntoConstraints = false
-
-        // Header
-        let iconView = NSImageView()
-        iconView.image = NSApp.applicationIconImage
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            iconView.widthAnchor.constraint(equalToConstant: 64),
-            iconView.heightAnchor.constraint(equalToConstant: 64),
-        ])
-
-        let titleLabel = NSTextField(labelWithString: "Xcode MCP Auto-Allower")
-        titleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
-
-        let versionLabel = NSTextField(labelWithString: "Benno Kress \u{2022} Version \(appVersion)")
-        versionLabel.font = NSFont.systemFont(ofSize: 12)
-        versionLabel.textColor = .secondaryLabelColor
-
-        let titleStack = NSStackView()
-        titleStack.orientation = .vertical
-        titleStack.alignment = .leading
-        titleStack.spacing = 2
-        titleStack.addArrangedSubview(titleLabel)
-        titleStack.addArrangedSubview(versionLabel)
-
-        let headerStack = NSStackView()
-        headerStack.orientation = .horizontal
-        headerStack.alignment = .centerY
-        headerStack.spacing = 16
-        headerStack.addArrangedSubview(iconView)
-        headerStack.addArrangedSubview(titleStack)
-
-        mainStack.addArrangedSubview(headerStack)
-
-        // Description
-        let descriptionLabel = NSTextField(wrappingLabelWithString:
-            "This app automatically approves Xcode\u{2019}s MCP permission dialogs " +
-            "when AI coding assistants connect, so you don\u{2019}t have to " +
-            "click \u{201C}Allow\u{201D} every single time.")
-        descriptionLabel.font = NSFont.systemFont(ofSize: 13)
-        descriptionLabel.preferredMaxLayoutWidth = textWidth
-        mainStack.addArrangedSubview(descriptionLabel)
-
-        // Accessibility status
-        let accessibilityStatusDot = NSView()
-        accessibilityStatusDot.wantsLayer = true
-        accessibilityStatusDot.layer?.cornerRadius = 5
-        accessibilityStatusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
-        accessibilityStatusDot.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            accessibilityStatusDot.widthAnchor.constraint(equalToConstant: 10),
-            accessibilityStatusDot.heightAnchor.constraint(equalToConstant: 10),
-        ])
-        self.accessibilityDot = accessibilityStatusDot
-
-        let accessibilityStatusLabel = NSTextField(labelWithString: "Accessibility: Checking\u{2026}")
-        accessibilityStatusLabel.font = NSFont.systemFont(ofSize: 13)
-        self.accessibilityLabel = accessibilityStatusLabel
-
-        let statusRow = NSStackView()
-        statusRow.orientation = .horizontal
-        statusRow.alignment = .centerY
-        statusRow.spacing = 8
-        statusRow.addArrangedSubview(accessibilityStatusDot)
-        statusRow.addArrangedSubview(accessibilityStatusLabel)
-        mainStack.addArrangedSubview(statusRow)
-
-        let accessibilityExplainer = NSTextField(wrappingLabelWithString:
-            "This app needs Accessibility access in System Settings to detect and " +
-            "click Xcode\u{2019}s permission dialogs automatically. If the status " +
-            "above shows \u{201C}Not Granted\u{201D}, click the button below.")
-        accessibilityExplainer.font = NSFont.systemFont(ofSize: 12)
-        accessibilityExplainer.textColor = .secondaryLabelColor
-        accessibilityExplainer.preferredMaxLayoutWidth = textWidth
-        mainStack.addArrangedSubview(accessibilityExplainer)
-
-        let openSettingsButton = NSButton(title: "Open Accessibility Settings",
-                                          target: self, action: #selector(openAccessibilitySettings))
-        openSettingsButton.bezelStyle = .rounded
-        mainStack.addArrangedSubview(openSettingsButton)
-        mainStack.addArrangedSubview(makeSeparator())
-
-        // LaunchAgent status
-        let launchAgentStatusDot = NSView()
-        launchAgentStatusDot.wantsLayer = true
-        launchAgentStatusDot.layer?.cornerRadius = 5
-        launchAgentStatusDot.layer?.backgroundColor = NSColor.systemGray.cgColor
-        launchAgentStatusDot.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            launchAgentStatusDot.widthAnchor.constraint(equalToConstant: 10),
-            launchAgentStatusDot.heightAnchor.constraint(equalToConstant: 10),
-        ])
-        self.launchAgentDot = launchAgentStatusDot
-
-        let launchAgentStatusLabel = NSTextField(labelWithString: "LaunchAgent: Checking\u{2026}")
-        launchAgentStatusLabel.font = NSFont.systemFont(ofSize: 13)
-        self.launchAgentLabel = launchAgentStatusLabel
-
-        let launchAgentStatusRow = NSStackView()
-        launchAgentStatusRow.orientation = .horizontal
-        launchAgentStatusRow.alignment = .centerY
-        launchAgentStatusRow.spacing = 8
-        launchAgentStatusRow.addArrangedSubview(launchAgentStatusDot)
-        launchAgentStatusRow.addArrangedSubview(launchAgentStatusLabel)
-        mainStack.addArrangedSubview(launchAgentStatusRow)
-
-        let launchAgentDescriptionLabel = NSTextField(wrappingLabelWithString: "Checking LaunchAgent status\u{2026}")
-        launchAgentDescriptionLabel.font = NSFont.systemFont(ofSize: 12)
-        launchAgentDescriptionLabel.textColor = .secondaryLabelColor
-        launchAgentDescriptionLabel.preferredMaxLayoutWidth = textWidth
-        self.launchAgentDescription = launchAgentDescriptionLabel
-        mainStack.addArrangedSubview(launchAgentDescriptionLabel)
-
-        // Management buttons
-        let pauseButton = NSButton(title: "Pause", target: self, action: #selector(togglePauseResume))
-        pauseButton.bezelStyle = .rounded
-        self.pauseResumeButton = pauseButton
-
-        let reinstallButton = NSButton(title: "Reinstall LaunchAgent", target: self, action: #selector(reinstallLaunchAgent))
-        reinstallButton.bezelStyle = .rounded
-
-        let manageSpacer = NSView()
-        manageSpacer.translatesAutoresizingMaskIntoConstraints = false
-        manageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let uninstallButton = NSButton(title: "Uninstall", target: self, action: #selector(uninstall))
-        uninstallButton.bezelStyle = .rounded
-        uninstallButton.contentTintColor = .systemRed
-
-        let manageRow = NSStackView()
-        manageRow.orientation = .horizontal
-        manageRow.spacing = 8
-        manageRow.alignment = .centerY
-        manageRow.addArrangedSubview(pauseButton)
-        manageRow.addArrangedSubview(reinstallButton)
-        manageRow.addArrangedSubview(manageSpacer)
-        manageRow.addArrangedSubview(uninstallButton)
-        manageRow.translatesAutoresizingMaskIntoConstraints = false
-        manageRow.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
-        mainStack.addArrangedSubview(manageRow)
-
-        let rebootCheckbox = NSButton(checkboxWithTitle: "Resume after system reboot",
-                                      target: self, action: #selector(rebootCheckboxChanged(_:)))
-        rebootCheckbox.state = resumeAfterReboot ? .on : .off
-        self.resumeAfterRebootCheckbox = rebootCheckbox
-        mainStack.addArrangedSubview(rebootCheckbox)
-        mainStack.addArrangedSubview(makeSeparator())
-
-        // Update section
-        let updateButton = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdatesButtonClicked))
-        updateButton.bezelStyle = .rounded
-
-        let betaCheckbox = NSButton(checkboxWithTitle: "Include beta versions",
-                                    target: self, action: #selector(betaToggleChanged(_:)))
-        betaCheckbox.state = includeBetaUpdates ? .on : .off
-
-        let updateRow = NSStackView()
-        updateRow.orientation = .horizontal
-        updateRow.spacing = 12
-        updateRow.alignment = .centerY
-        updateRow.addArrangedSubview(updateButton)
-        updateRow.addArrangedSubview(betaCheckbox)
-        mainStack.addArrangedSubview(updateRow)
-        mainStack.addArrangedSubview(makeSeparator())
-
-        // Footer link
-        let githubLinkButton = NSButton(title: "bennokress/xcode-mcp-auto-allower on GitHub",
-                                         target: self, action: #selector(openGitHub))
-        githubLinkButton.isBordered = false
-        githubLinkButton.font = NSFont.systemFont(ofSize: 11)
-        githubLinkButton.contentTintColor = .linkColor
-        if let githubImage = NSImage(named: "github.fill") {
-            githubImage.isTemplate = true
-            githubLinkButton.image = githubImage
-            githubLinkButton.imagePosition = .imageLeading
-        }
-        mainStack.addArrangedSubview(githubLinkButton)
-
-        // Layout
-        guard let contentView = newWindow.contentView else { return }
-
-        contentView.addSubview(mainStack)
-        NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: contentView.topAnchor),
-            mainStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            mainStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            mainStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            mainStack.widthAnchor.constraint(equalToConstant: 480),
-        ])
-
-        contentView.layoutSubtreeIfNeeded()
-        newWindow.setContentSize(contentView.fittingSize)
+        newWindow.contentView = hostingView
+        newWindow.setContentSize(hostingView.fittingSize)
         newWindow.center()
-
         self.window = newWindow
-    }
-
-    /// Creates a horizontal separator line constrained to ``textWidth``.
-    /// - Returns: A configured separator box.
-    func makeSeparator() -> NSBox {
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        separator.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
-        return separator
     }
 
     // MARK: Actions
 
-    /// Opens the macOS Accessibility privacy settings in System Settings.
-    @objc func openAccessibilitySettings() {
-        NSWorkspace.shared.open(
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-    }
-
-    /// Opens the project's GitHub repository in the default browser.
-    @objc func openGitHub() {
-        NSWorkspace.shared.open(URL(string: githubURL)!)
-    }
-
-    /// Handles the "Include beta versions" checkbox toggle and triggers a silent update check.
-    @objc func betaToggleChanged(_ sender: NSButton) {
-        includeBetaUpdates = sender.state == .on
-        checkForUpdates(silent: true)
-    }
-
     /// Toggles the daemon between paused and running states.
-    ///
-    /// When pausing, boots out the LaunchAgent and optionally removes the plist
-    /// (depending on ``resumeAfterReboot``). When resuming, reinstalls via ``ensureLaunchAgent()``.
-    @objc func togglePauseResume() {
-        let status = detectLaunchAgentStatus()
-        if status == .running {
-            // Pause
+    func togglePauseResume() {
+        if appState.launchAgentStatus == .running {
             run("/bin/launchctl", "bootout", "gui/\(getuid())/\(label)")
             launchAgentPaused = true
-
             if !resumeAfterReboot {
                 try? FileManager.default.removeItem(atPath: launchAgentPlistPath())
             }
         } else {
-            // Resume
             ensureLaunchAgent()
             launchAgentPaused = false
         }
-        updateStatus()
+        appState.refreshStatus()
     }
 
-    /// Handles the "Resume after system reboot" checkbox.
-    ///
-    /// When paused, writes or removes the plist so `launchctl` knows whether to restart after reboot.
-    @objc func rebootCheckboxChanged(_ sender: NSButton) {
-        resumeAfterReboot = sender.state == .on
-
+    /// Handles the "Resume after system reboot" toggle change.
+    func handleRebootCheckboxChanged(_ newValue: Bool) {
+        resumeAfterReboot = newValue
         if launchAgentPaused {
             if resumeAfterReboot {
                 writeLaunchAgentPlist()
@@ -748,37 +822,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         }
     }
 
-    /// Prompts for confirmation, then force-reinstalls the LaunchAgent from scratch.
-    @objc func reinstallLaunchAgent() {
-        let alert = NSAlert()
-        alert.messageText = "Reinstall LaunchAgent?"
-        alert.informativeText = "Use this if the background watcher isn\u{2019}t running correctly."
-        alert.addButton(withTitle: "Reinstall")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        // Force reinstall by removing existing plist first
+    /// Force-reinstalls the LaunchAgent from scratch. Called from the confirmation alert action.
+    func doReinstallLaunchAgent() {
         let plistPath = launchAgentPlistPath()
         try? FileManager.default.removeItem(atPath: plistPath)
         ensureLaunchAgent()
         launchAgentPaused = false
-        updateStatus()
-        showInfo("Background watcher reinstalled successfully.")
+        appState.refreshStatus()
+        DispatchQueue.main.async {
+            self.appState.activeAlert = .info("Background watcher reinstalled successfully.")
+        }
     }
 
     /// Completely removes the app, LaunchAgent, logs, config, and Accessibility permissions.
-    ///
-    /// After confirmation, spawns a detached shell script that waits for this process to exit
-    /// before deleting the `.app` bundle, then terminates the app.
-    @objc func uninstall() {
-        let alert = NSAlert()
-        alert.messageText = "Uninstall Xcode MCP Auto-Allower?"
-        alert.informativeText = "This will remove the app and all related data from your Mac."
-        alert.addButton(withTitle: "Uninstall")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .critical
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
+    /// Called from the confirmation alert action.
+    func doUninstall() {
         let plistPath = launchAgentPlistPath()
         let configDirectory = NSHomeDirectory() + "/.config/xcode-mcp-allower"
         let appPath = Bundle.main.bundlePath
@@ -816,10 +874,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     // MARK: Update Check (Interactive)
 
-    @objc func checkForUpdatesButtonClicked() {
-        checkForUpdates(silent: false)
-    }
-
     /// Fetches the latest releases from GitHub and shows an update alert if a newer version exists.
     /// - Parameter silent: When `true`, suppresses "up to date" and error messages.
     func checkForUpdates(silent: Bool = false) {
@@ -829,45 +883,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 guard let self else { return }
 
                 if error != nil {
-                    if !silent { self.showError("Unable to check for updates. Please check your internet connection.") }
+                    if !silent { self.appState.activeAlert = .error("Unable to check for updates. Please check your internet connection.") }
                     return
                 }
 
                 guard let data,
                       let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                    if !silent { self.showError("Unable to check for updates. Please try again later.") }
+                    if !silent { self.appState.activeAlert = .error("Unable to check for updates. Please try again later.") }
                     return
                 }
 
                 guard let json = self.firstMatchingRelease(from: releases) else {
-                    if !silent { self.showInfo("You\u{2019}re on the latest version (\(appVersion)).") }
+                    if !silent { self.appState.activeAlert = .info("You\u{2019}re on the latest version (\(appVersion)).") }
                     return
                 }
 
                 let latest = releaseVersion(from: json)
 
                 if isNewerVersion(latest, than: appVersion) {
-                    self.showUpdateAlert(json: json)
+                    self.pendingUpdateJSON = json
+                    self.appState.activeAlert = .updateAvailable(latest)
                 } else {
-                    if !silent { self.showInfo("You\u{2019}re on the latest version (\(appVersion)).") }
+                    if !silent { self.appState.activeAlert = .info("You\u{2019}re on the latest version (\(appVersion)).") }
                 }
             }
         }.resume()
-    }
-
-    /// Displays a modal alert offering to install the update described by the given release JSON.
-    /// - Parameter json: A GitHub release JSON dictionary.
-    func showUpdateAlert(json: [String: Any]) {
-        let latest = releaseVersion(from: json)
-
-        let alert = NSAlert()
-        alert.messageText = "Update Available"
-        alert.informativeText = "A new version is available.\n\nInstalled: \(appVersion)\nAvailable: \(latest)"
-        alert.addButton(withTitle: "Update")
-        alert.addButton(withTitle: "Later")
-        if alert.runModal() == .alertFirstButtonReturn {
-            self.performUpdate(json: json)
-        }
     }
 
     // MARK: Update Check (Background)
@@ -906,13 +946,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     // MARK: Release Filtering
 
-    /// Returns the first non-draft release, optionally filtering out prereleases.
+    /// Returns the first non-draft release that has a downloadable DMG asset,
+    /// optionally filtering out prereleases.
     /// - Parameter releases: An array of GitHub release JSON dictionaries.
     /// - Returns: The first matching release, or `nil` if none qualify.
     func firstMatchingRelease(from releases: [[String: Any]]) -> [String: Any]? {
         for release in releases {
             if release["draft"] as? Bool == true { continue }
             if !includeBetaUpdates && release["prerelease"] as? Bool == true { continue }
+            guard let assets = release["assets"] as? [[String: Any]],
+                  assets.contains(where: { ($0["name"] as? String ?? "").hasSuffix(".dmg") })
+            else { continue }
             return release
         }
         return nil
@@ -933,69 +977,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
               let dmgAsset = assets.first(where: { ($0["name"] as? String ?? "").hasSuffix(".dmg") }),
               let downloadURLString = dmgAsset["browser_download_url"] as? String,
               let downloadURL = URL(string: downloadURLString) else {
-            showError("This update isn\u{2019}t available for download yet. Please try again later.")
+            appState.activeAlert = .error("This update isn\u{2019}t available for download yet. Please try again later.")
             return
         }
 
-        // Show progress
+        // Build progress UI
         let progressAlert = NSAlert()
-        progressAlert.messageText = "Downloading Update..."
-        progressAlert.informativeText = "Installing \(latest) \u{2014} this may take a moment."
+        progressAlert.messageText = "Updating to \(latest)\u{2026}"
+        progressAlert.informativeText = ""
         progressAlert.addButton(withTitle: "Cancel")
-        progressAlert.buttons.first?.isHidden = true
 
-        let indicator = NSProgressIndicator()
-        indicator.style = .spinning
-        indicator.controlSize = .small
-        indicator.startAnimation(nil)
-        indicator.sizeToFit()
-        progressAlert.accessoryView = indicator
+        let progressModel = UpdateProgress()
+        let hostingView = NSHostingView(rootView: UpdateProgressView(model: progressModel))
+        progressAlert.accessoryView = hostingView
 
-        // Run download asynchronously
-        DispatchQueue.global().async { [weak self] in
-            guard let self else { return }
+        // Match the Cancel button's visible bezel width
+        progressAlert.window.layoutIfNeeded()
+        if let button = progressAlert.buttons.first, let cell = button.cell {
+            let drawingRect = cell.drawingRect(forBounds: button.bounds)
+            hostingView.frame.size = hostingView.fittingSize
+            hostingView.frame.size.width = drawingRect.width
+        }
 
-            let abortUpdate = { [weak self] in
-                DispatchQueue.main.async {
-                    NSApp.stopModal()
-                    self?.showError("The update could not be installed. Please try again later.")
-                }
+        // State shared between the download callbacks and the cancel handler
+        var isCancelled = false
+        var downloadSession: URLSession?
+        var downloadTask: URLSessionDownloadTask?
+        var activeMountPoint: String?
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-mcp-allower-update-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        let dmgPath = temporaryDirectory.appendingPathComponent("update.dmg")
+
+        let abortUpdate = { [weak self] in
+            DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                NSApp.stopModal()
+                self?.appState.activeAlert = .error("The update could not be installed. Please try again later.")
             }
+        }
 
-            let temporaryDirectory = FileManager.default.temporaryDirectory
-                .appendingPathComponent("xcode-mcp-allower-update-\(UUID().uuidString)")
-            try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-            let dmgPath = temporaryDirectory.appendingPathComponent("update.dmg")
+        // Set up download delegate
+        let delegate = DownloadDelegate()
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        downloadSession = session
 
-            // Download DMG synchronously on background thread
-            var dmgData: Data?
-            let semaphore = DispatchSemaphore(value: 0)
-            URLSession.shared.dataTask(with: downloadURL) { data, _, _ in
-                dmgData = data
-                semaphore.signal()
-            }.resume()
-            semaphore.wait()
-
-            guard let dmgData else {
-                abortUpdate()
-                return
+        delegate.onProgress = { fraction in
+            DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                progressModel.progress = fraction
+                progressModel.status = "Downloading\u{2026} \(Int(fraction * 100))%"
             }
+        }
 
+        delegate.onComplete = { [weak self] location in
+            guard let self, !isCancelled else { return }
+
+            // Copy downloaded file to our temp directory
             do {
-                try dmgData.write(to: dmgPath)
+                try FileManager.default.moveItem(at: location, to: dmgPath)
             } catch {
                 abortUpdate()
                 return
             }
 
+            DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                progressModel.status = "Preparing installation\u{2026}"
+            }
+
             // Mount the DMG
-            let mountTask = Process()
-            mountTask.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-            mountTask.arguments = ["attach", dmgPath.path, "-nobrowse", "-readonly", "-quiet"]
-            mountTask.standardOutput = FileHandle.nullDevice
-            mountTask.standardError = FileHandle.nullDevice
-            try? mountTask.run()
-            mountTask.waitUntilExit()
+            let mountProcess = Process()
+            mountProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            mountProcess.arguments = ["attach", dmgPath.path, "-nobrowse", "-readonly", "-quiet"]
+            mountProcess.standardOutput = FileHandle.nullDevice
+            mountProcess.standardError = FileHandle.nullDevice
+            try? mountProcess.run()
+            mountProcess.waitUntilExit()
+
+            guard !isCancelled else { return }
 
             // Find the .app in the mount point
             let volumesDirectory = "/Volumes"
@@ -1005,25 +1065,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             }
 
             var mountedAppPath: String?
-            var mountPoint: String?
             for volume in volumes {
                 let volumePath = "\(volumesDirectory)/\(volume)"
                 let candidateApp = "\(volumePath)/Xcode MCP Auto-Allower.app"
                 if FileManager.default.fileExists(atPath: candidateApp) {
                     mountedAppPath = candidateApp
-                    mountPoint = volumePath
+                    activeMountPoint = volumePath
                     break
                 }
             }
 
-            guard let sourceApp = mountedAppPath, let mount = mountPoint else {
+            guard let sourceApp = mountedAppPath, let mount = activeMountPoint else {
                 abortUpdate()
                 return
             }
 
+            guard !isCancelled else { return }
+
             // Spawn detached updater script
             let currentAppPath = Bundle.main.bundlePath
             let pid = ProcessInfo.processInfo.processIdentifier
+            let plistPath = launchAgentPlistPath()
             let script = """
                 while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
                 rm -rf \(self.shellQuote(currentAppPath))
@@ -1032,9 +1094,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 rm -rf \(self.shellQuote(temporaryDirectory.path))
                 sleep 0.5
                 open \(self.shellQuote(currentAppPath))
+                sleep 2
+                /bin/launchctl bootstrap gui/$(id -u) \(self.shellQuote(plistPath))
                 """
 
             DispatchQueue.main.async {
+                guard !isCancelled else { return }
+                progressModel.status = "Quitting version \(appVersion)\u{2026}"
+                progressModel.progress = 1
+
                 NSApp.stopModal()
 
                 let task = Process()
@@ -1044,11 +1112,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 task.standardError = FileHandle.nullDevice
                 try? task.run()
 
+                // Bootout LaunchAgent before terminating so KeepAlive doesn't restart us
+                run("/bin/launchctl", "bootout", "gui/\(getuid())/\(label)")
                 NSApp.terminate(nil)
             }
         }
 
-        progressAlert.runModal()
+        delegate.onError = {
+            guard !isCancelled else { return }
+            abortUpdate()
+        }
+
+        // Start download
+        let task = session.downloadTask(with: downloadURL)
+        downloadTask = task
+        task.resume()
+
+        // Block until the alert is dismissed (by Cancel button or stopModal)
+        let response = progressAlert.runModal()
+
+        // If we get here via the Cancel button, clean up
+        if response == .alertFirstButtonReturn {
+            isCancelled = true
+            downloadTask?.cancel()
+            downloadSession?.invalidateAndCancel()
+            if let mount = activeMountPoint {
+                run("/usr/bin/hdiutil", "detach", mount, "-quiet")
+            }
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
     }
 
     // MARK: Helpers
@@ -1060,24 +1152,4 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         "'" + string.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Displays a modal error alert with the given message.
-    /// - Parameter message: The error description shown to the user.
-    func showError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Error"
-        alert.informativeText = message
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
-    /// Displays a modal informational alert with the given message.
-    /// - Parameter message: The information shown to the user.
-    func showInfo(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Xcode MCP Auto-Allower"
-        alert.informativeText = message
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
 }

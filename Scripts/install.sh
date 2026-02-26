@@ -6,7 +6,7 @@
 # =============================================================================
 set -euo pipefail
 
-LABEL="com.local.xcode-mcp-allower"
+LABEL="com.bennokress.xcode-mcp-allower"
 APP_NAME="Xcode MCP Auto-Allower"
 APP_DIR="$HOME/Applications/${APP_NAME}.app"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
