@@ -76,7 +76,7 @@ tail -f ~/Library/Logs/xcode-mcp-allower.log
 
 ## App Icon
 
-The app icon is an Xcode 26 Icon Composer package (`App Icon.icon/`). During build, `actool` compiles it into `Assets.car` with Liquid Glass rendering. To customize, edit the `.icon` package in Icon Composer and rebuild.
+The app icon is an Xcode 26 Icon Composer package (`Assets/App Icon.icon/`). During build, `actool` compiles it into `Assets.car` with Liquid Glass rendering. To customize, edit the `.icon` package in Icon Composer and rebuild.
 
 ## Troubleshooting
 
@@ -99,7 +99,7 @@ For local development (compiles from source, no signing):
 ```bash
 git clone https://github.com/bennokress/xcode-mcp-auto-allower.git
 cd xcode-mcp-auto-allower
-./install.sh
+./Scripts/install.sh
 ```
 
 Requires Xcode Command Line Tools (`xcode-select --install`).
@@ -113,10 +113,10 @@ export APPLE_ID="you@example.com"
 export TEAM_ID="TEAMID"
 export APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"  # or @keychain:notarytool
 
-./scripts/build-dmg.sh
+./Scripts/build-dmg.sh
 ```
 
-The signed + notarized DMG is output to `dist/`.
+The signed + notarized DMG is output to `Distribution/`.
 
 ---
 

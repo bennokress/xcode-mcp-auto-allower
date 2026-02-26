@@ -2,7 +2,7 @@
 # =============================================================================
 # install.sh — Development-only install script.
 # Compiles from source and installs locally without code signing.
-# For user-facing distribution, see ./scripts/build-dmg.sh instead.
+# For user-facing distribution, see ./Scripts/build-dmg.sh instead.
 # =============================================================================
 set -euo pipefail
 
@@ -12,17 +12,18 @@ APP_DIR="$HOME/Applications/${APP_NAME}.app"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_FILE="$HOME/Library/Logs/xcode-mcp-allower.log"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="${SCRIPT_DIR}/build"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="${REPO_DIR}/build"
 BINARY_NAME="xcode-mcp-allower"
 
 # Determine version from git tags, fallback to 1.0.0
-VERSION=$(git -C "$SCRIPT_DIR" describe --tags 2>/dev/null | sed 's/^v//' || echo "1.0.0")
+VERSION=$(git -C "$REPO_DIR" describe --tags 2>/dev/null | sed 's/^v//' || echo "1.0.0")
 
 echo "==> Building ${APP_NAME} v${VERSION}..."
 mkdir -p "$BUILD_DIR"
 
 # Compile app icon from Icon Composer package via actool
-ICON_SRC="${SCRIPT_DIR}/App Icon.icon"
+ICON_SRC="${REPO_DIR}/Assets/App Icon.icon"
 ICON_COMPILED=false
 if [ -d "$ICON_SRC" ]; then
     echo "    Compiling app icon..."
@@ -52,7 +53,7 @@ let githubURL = "https://github.com/bennokress/xcode-mcp-auto-allower"
 VEOF
 
 # Compile main binary
-swiftc -O "${SCRIPT_DIR}/Sources/xcode-mcp-allower.swift" "${BUILD_DIR}/Version.swift" \
+swiftc -O "${REPO_DIR}/Sources/xcode-mcp-allower.swift" "${BUILD_DIR}/Version.swift" \
     -o "${BUILD_DIR}/${BINARY_NAME}"
 echo "    Compiled successfully."
 
@@ -153,7 +154,7 @@ echo "    LaunchAgent written."
 
 # Store repo path for in-app reinstall/update
 mkdir -p "$HOME/.config/xcode-mcp-allower"
-echo "$SCRIPT_DIR" > "$HOME/.config/xcode-mcp-allower/repo-path"
+echo "$REPO_DIR" > "$HOME/.config/xcode-mcp-allower/repo-path"
 
 # Load daemon
 echo "==> Loading daemon..."
