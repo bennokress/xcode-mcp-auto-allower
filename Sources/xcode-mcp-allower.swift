@@ -164,6 +164,8 @@ func startDaemon() {
     if isAccessibilityEnabled() {
         NSLog("[xcode-mcp-allower] Accessibility permission: GRANTED")
     } else {
+        // Prompt adds the app to Accessibility settings with an off toggle so the user only needs to flip it on.
+        AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         NSLog("[xcode-mcp-allower] WARNING: Accessibility permission NOT granted!")
     }
 
