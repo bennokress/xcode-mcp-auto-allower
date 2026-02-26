@@ -906,13 +906,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     // MARK: Release Filtering
 
-    /// Returns the first non-draft release, optionally filtering out prereleases.
+    /// Returns the first non-draft release that has a downloadable DMG asset,
+    /// optionally filtering out prereleases.
     /// - Parameter releases: An array of GitHub release JSON dictionaries.
     /// - Returns: The first matching release, or `nil` if none qualify.
     func firstMatchingRelease(from releases: [[String: Any]]) -> [String: Any]? {
         for release in releases {
             if release["draft"] as? Bool == true { continue }
             if !includeBetaUpdates && release["prerelease"] as? Bool == true { continue }
+            guard let assets = release["assets"] as? [[String: Any]],
+                  assets.contains(where: { ($0["name"] as? String ?? "").hasSuffix(".dmg") })
+            else { continue }
             return release
         }
         return nil
