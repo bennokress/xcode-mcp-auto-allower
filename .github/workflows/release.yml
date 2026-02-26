@@ -45,14 +45,14 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-        run: ./scripts/build-dmg.sh
+        run: ./Scripts/build-dmg.sh
 
       - name: Upload DMG to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ github.ref_name }}"
-          DMG_FILE=$(ls dist/*.dmg)
+          DMG_FILE=$(ls Distribution/*.dmg)
 
           # Create release if it doesn't exist yet (e.g. triggered by git tag push)
           if ! gh release view "$TAG" &>/dev/null; then

@@ -299,7 +299,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let titleLabel = NSTextField(labelWithString: "Xcode MCP Auto-Allower")
         titleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
 
-        let versionLabel = NSTextField(labelWithString: "Version \(appVersion)")
+        let versionLabel = NSTextField(labelWithString: "Benno Kress \u{2022} Version \(appVersion)")
         versionLabel.font = NSFont.systemFont(ofSize: 12)
         versionLabel.textColor = .secondaryLabelColor
 
@@ -323,7 +323,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Description
         let descLabel = NSTextField(wrappingLabelWithString:
             "This app automatically approves Xcode\u{2019}s MCP permission dialogs " +
-            "when AI coding assistants connect \u{2014} so you don\u{2019}t have to " +
+            "when AI coding assistants connect, so you don\u{2019}t have to " +
             "click \u{201C}Allow\u{201D} every single time.")
         descLabel.font = NSFont.systemFont(ofSize: 13)
         descLabel.preferredMaxLayoutWidth = textWidth
@@ -443,7 +443,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func reinstallLaunchAgent() {
         let alert = NSAlert()
         alert.messageText = "Reinstall LaunchAgent?"
-        alert.informativeText = "This will rewrite and reload the LaunchAgent plist. Use this if the daemon isn\u{2019}t starting correctly."
+        alert.informativeText = "Use this if the background watcher isn\u{2019}t running correctly."
         alert.addButton(withTitle: "Reinstall")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -452,13 +452,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let plistPath = launchAgentPlistPath()
         try? FileManager.default.removeItem(atPath: plistPath)
         ensureLaunchAgent()
-        showInfo("LaunchAgent reinstalled and loaded.")
+        showInfo("Background watcher reinstalled successfully.")
     }
 
     @objc func uninstall() {
         let alert = NSAlert()
         alert.messageText = "Uninstall Xcode MCP Auto-Allower?"
-        alert.informativeText = "This will stop the daemon and remove the app, LaunchAgent, and all related files."
+        alert.informativeText = "This will remove the app and all related data from your Mac."
         alert.addButton(withTitle: "Uninstall")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .critical

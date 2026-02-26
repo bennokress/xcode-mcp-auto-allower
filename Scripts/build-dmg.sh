@@ -23,7 +23,7 @@ BINARY_NAME="xcode-mcp-allower"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="${REPO_DIR}/build"
-DIST_DIR="${REPO_DIR}/dist"
+DIST_DIR="${REPO_DIR}/Distribution"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 
 # Determine version from git tags, fallback to 1.0.0
@@ -37,7 +37,7 @@ mkdir -p "$DIST_DIR"
 # ---------------------------------------------------------------------------
 # Step 1: Compile app icon
 # ---------------------------------------------------------------------------
-ICON_SRC="${REPO_DIR}/App Icon.icon"
+ICON_SRC="${REPO_DIR}/Assets/App Icon.icon"
 ICON_COMPILED=false
 if [ -d "$ICON_SRC" ]; then
     echo "    Compiling app icon..."
