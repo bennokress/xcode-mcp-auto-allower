@@ -18,7 +18,7 @@ set -euo pipefail
 # =============================================================================
 
 APP_NAME="Xcode MCP Auto-Allower"
-LABEL="com.local.xcode-mcp-allower"
+LABEL="com.bennokress.xcode-mcp-allower"
 BINARY_NAME="xcode-mcp-allower"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

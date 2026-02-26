@@ -7,7 +7,7 @@ import UserNotifications
 // MARK: - Constants
 
 /// The LaunchAgent bundle identifier used for launchctl registration and plist naming.
-let label = "com.local.xcode-mcp-allower"
+let label = "com.bennokress.xcode-mcp-allower"
 
 /// The bundle identifier used to identify Xcode in running application queries.
 let xcodeBundleID = "com.apple.dt.Xcode"
