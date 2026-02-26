@@ -1,4 +1,8 @@
 #!/bin/bash
+# =============================================================================
+# uninstall.sh — Completely removes the app, LaunchAgent, logs, config,
+# and Accessibility permissions from the system.
+# =============================================================================
 set -euo pipefail
 
 LABEL="com.local.xcode-mcp-allower"
