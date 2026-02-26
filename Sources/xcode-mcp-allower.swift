@@ -901,10 +901,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         run("/usr/bin/tccutil", "reset", "Accessibility", label)
 
         // 7. Spawn detached script to delete the .app bundle after this process exits, then quit
+        let appName = "Xcode MCP Auto-Allower.app"
+        let allAppPaths = Set([
+            appPath,
+            home + "/Applications/" + appName,
+            "/Applications/" + appName,
+        ])
         let pid = ProcessInfo.processInfo.processIdentifier
+        let rmLines = allAppPaths.map { "rm -rf \(shellQuote($0))" }.joined(separator: "\n")
         let script = """
             while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
-            rm -rf \(shellQuote(appPath))
+            \(rmLines)
             """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
