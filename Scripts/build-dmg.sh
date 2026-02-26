@@ -75,7 +75,7 @@ VEOF
 # Step 3: Compile binary
 # ---------------------------------------------------------------------------
 echo "    Compiling..."
-swiftc -O "${REPO_DIR}/Sources/xcode-mcp-allower.swift" "${BUILD_DIR}/Version.swift" \
+swiftc -O "${REPO_DIR}"/Sources/*.swift "${BUILD_DIR}/Version.swift" \
     -o "${BUILD_DIR}/${BINARY_NAME}"
 echo "    Compiled successfully."
 
@@ -198,6 +198,11 @@ tell application "Finder"
 end tell
 ASEOF
 echo "    Window appearance configured."
+
+# Hide system dot-directories from users who have "Show hidden files" on
+for item in "${MOUNT_POINT}"/.??*; do
+    [ -e "$item" ] && chflags hidden "$item"
+done
 
 # Sync filesystem changes and unmount
 sync
