@@ -16,6 +16,14 @@ let xcodeBundleID = "com.apple.dt.Xcode"
 /// The path to the daemon's log file.
 let logFile = NSHomeDirectory() + "/Library/Logs/xcode-mcp-allower.log"
 
+/// Checks whether this process has Accessibility permission by querying the TCC database directly.
+///
+/// Unlike plain `AXIsProcessTrusted()`, passing an options dictionary forces macOS to
+/// re-read the database instead of returning a stale cached value within the same process.
+func isAccessibilityEnabled() -> Bool {
+    AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary)
+}
+
 // MARK: - Daemon Logic
 
 /// Maps Xcode process IDs to their corresponding accessibility observers for cleanup on termination.
@@ -39,7 +47,7 @@ func clickAllowIfPresent(in app: AXUIElement) {
     let axResult = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef)
     guard axResult == .success, let windows = windowsRef as? [AXUIElement] else {
         NSLog("[xcode-mcp-allower] Cannot read Xcode windows (AXError=%d). AXIsProcessTrusted=%d.",
-              axResult.rawValue, AXIsProcessTrusted())
+              axResult.rawValue, isAccessibilityEnabled())
         return
     }
 
@@ -153,7 +161,7 @@ func startDaemon() {
         setupObserver(for: app)
     }
 
-    if AXIsProcessTrusted() {
+    if isAccessibilityEnabled() {
         NSLog("[xcode-mcp-allower] Accessibility permission: GRANTED")
     } else {
         NSLog("[xcode-mcp-allower] WARNING: Accessibility permission NOT granted!")
@@ -388,7 +396,7 @@ class AppState {
 
     /// Polls accessibility and LaunchAgent status from the system.
     func refreshStatus() {
-        isAccessibilityGranted = AXIsProcessTrusted()
+        isAccessibilityGranted = isAccessibilityEnabled()
         let paused = UserDefaults.standard.bool(forKey: "launchAgentPaused")
         if paused {
             launchAgentStatus = .paused
