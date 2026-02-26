@@ -7,7 +7,8 @@ set -euo pipefail
 
 LABEL="com.bennokress.xcode-mcp-allower"
 APP_NAME="Xcode MCP Auto-Allower"
-APP_DIR="$HOME/Applications/${APP_NAME}.app"
+APP_DIR_USER="$HOME/Applications/${APP_NAME}.app"
+APP_DIR_SYSTEM="/Applications/${APP_NAME}.app"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_FILE="$HOME/Library/Logs/xcode-mcp-allower.log"
 CONFIG_DIR="$HOME/.config/xcode-mcp-allower"
@@ -24,11 +25,13 @@ if [ -f "$PLIST" ]; then
     echo "    Removed LaunchAgent plist."
 fi
 
-# Remove app bundle
-if [ -d "$APP_DIR" ]; then
-    rm -rf "$APP_DIR"
-    echo "    Removed app bundle."
-fi
+# Remove app bundle (check both ~/Applications and /Applications)
+for APP_DIR in "$APP_DIR_USER" "$APP_DIR_SYSTEM"; do
+    if [ -d "$APP_DIR" ]; then
+        rm -rf "$APP_DIR"
+        echo "    Removed app bundle at ${APP_DIR}."
+    fi
+done
 
 # Remove old raw binary (migration leftover)
 if [ -f "$HOME/.local/bin/xcode-mcp-allower" ]; then
@@ -39,6 +42,18 @@ if [ -f "$HOME/.local/bin/xcode-mcp-allower.swift" ]; then
     rm -f "$HOME/.local/bin/xcode-mcp-allower.swift"
     echo "    Removed old source at ~/.local/bin/xcode-mcp-allower.swift"
 fi
+
+# Remove ~/Library artefacts (Caches, HTTPStorages, Preferences)
+for SUBPATH in \
+    "Library/Caches/${LABEL}" \
+    "Library/HTTPStorages/${LABEL}" \
+    "Library/Preferences/${LABEL}.plist"; do
+    TARGET="$HOME/$SUBPATH"
+    if [ -e "$TARGET" ]; then
+        rm -rf "$TARGET"
+        echo "    Removed ~/$SUBPATH"
+    fi
+done
 
 # Reset Accessibility permission
 echo "    Resetting Accessibility permission..."

@@ -16,6 +16,14 @@ let xcodeBundleID = "com.apple.dt.Xcode"
 /// The path to the daemon's log file.
 let logFile = NSHomeDirectory() + "/Library/Logs/xcode-mcp-allower.log"
 
+/// Checks whether this process has Accessibility permission by querying the TCC database directly.
+///
+/// Unlike plain `AXIsProcessTrusted()`, passing an options dictionary forces macOS to
+/// re-read the database instead of returning a stale cached value within the same process.
+func isAccessibilityEnabled() -> Bool {
+    AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary)
+}
+
 // MARK: - Daemon Logic
 
 /// Maps Xcode process IDs to their corresponding accessibility observers for cleanup on termination.
@@ -39,7 +47,7 @@ func clickAllowIfPresent(in app: AXUIElement) {
     let axResult = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef)
     guard axResult == .success, let windows = windowsRef as? [AXUIElement] else {
         NSLog("[xcode-mcp-allower] Cannot read Xcode windows (AXError=%d). AXIsProcessTrusted=%d.",
-              axResult.rawValue, AXIsProcessTrusted())
+              axResult.rawValue, isAccessibilityEnabled())
         return
     }
 
@@ -153,9 +161,11 @@ func startDaemon() {
         setupObserver(for: app)
     }
 
-    if AXIsProcessTrusted() {
+    if isAccessibilityEnabled() {
         NSLog("[xcode-mcp-allower] Accessibility permission: GRANTED")
     } else {
+        // Prompt adds the app to Accessibility settings with an off toggle so the user only needs to flip it on.
+        AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         NSLog("[xcode-mcp-allower] WARNING: Accessibility permission NOT granted!")
     }
 
@@ -388,7 +398,7 @@ class AppState {
 
     /// Polls accessibility and LaunchAgent status from the system.
     func refreshStatus() {
-        isAccessibilityGranted = AXIsProcessTrusted()
+        isAccessibilityGranted = isAccessibilityEnabled()
         let paused = UserDefaults.standard.bool(forKey: "launchAgentPaused")
         if paused {
             launchAgentStatus = .paused
@@ -690,6 +700,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
         ensureLaunchAgent()
         startDaemon()
 
@@ -756,6 +767,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
+    }
+
+    // MARK: Main Menu
+
+    /// Sets up a minimal main menu so that standard keyboard shortcuts (e.g. CMD+Q) work
+    /// even though the app uses `LSUIElement` and has no persistent menu bar.
+    func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit Xcode MCP Auto-Allower", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     // MARK: Window Management
@@ -853,14 +889,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // 4. Remove config directory
         try? FileManager.default.removeItem(atPath: configDirectory)
 
-        // 5. Reset Accessibility permission
+        // 5. Remove ~/Library artefacts (Caches, HTTPStorages, Preferences)
+        let home = NSHomeDirectory()
+        for subpath in [
+            "/Library/Caches/\(label)",
+            "/Library/HTTPStorages/\(label)",
+            "/Library/Preferences/\(label).plist",
+        ] {
+            try? FileManager.default.removeItem(atPath: home + subpath)
+        }
+
+        // 6. Reset Accessibility permission
         run("/usr/bin/tccutil", "reset", "Accessibility", label)
 
-        // 6. Spawn detached script to delete the .app bundle after this process exits, then quit
+        // 7. Spawn detached script to delete the .app bundle after this process exits, then quit
+        let appName = "Xcode MCP Auto-Allower.app"
+        let allAppPaths = Set([
+            appPath,
+            home + "/Applications/" + appName,
+            "/Applications/" + appName,
+        ])
         let pid = ProcessInfo.processInfo.processIdentifier
+        let rmLines = allAppPaths.map { "rm -rf \(shellQuote($0))" }.joined(separator: "\n")
         let script = """
             while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
-            rm -rf \(shellQuote(appPath))
+            \(rmLines)
             """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
