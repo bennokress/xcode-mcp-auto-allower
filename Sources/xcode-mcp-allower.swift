@@ -409,7 +409,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         mainStack.addArrangedSubview(makeSeparator())
 
         // Update section
-        let updateBtn = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdates))
+        let updateBtn = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdatesButtonClicked))
         updateBtn.bezelStyle = .rounded
 
         let betaCheckbox = NSButton(checkboxWithTitle: "Include beta versions",
@@ -494,7 +494,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     @objc func betaToggleChanged(_ sender: NSButton) {
         includeBetaUpdates = sender.state == .on
-        checkForUpdates()
+        checkForUpdates(silent: true)
     }
 
     @objc func reinstallLaunchAgent() {
@@ -571,25 +571,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     // MARK: Update Check (Interactive)
 
-    @objc func checkForUpdates() {
+    @objc func checkForUpdatesButtonClicked() {
+        checkForUpdates(silent: false)
+    }
+
+    func checkForUpdates(silent: Bool = false) {
         let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases")!
         URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self else { return }
 
                 if let _ = error {
-                    self.showError("Unable to check for updates. Please check your internet connection.")
+                    if !silent { self.showError("Unable to check for updates. Please check your internet connection.") }
                     return
                 }
 
                 guard let data,
                       let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                    self.showError("Unable to check for updates. Please try again later.")
+                    if !silent { self.showError("Unable to check for updates. Please try again later.") }
                     return
                 }
 
                 guard let json = self.firstMatchingRelease(from: releases) else {
-                    self.showInfo("You\u{2019}re on the latest version (\(appVersion)).")
+                    if !silent { self.showInfo("You\u{2019}re on the latest version (\(appVersion)).") }
                     return
                 }
 
@@ -599,7 +603,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 if isNewerVersion(latest, than: appVersion) {
                     self.showUpdateAlert(json: json)
                 } else {
-                    self.showInfo("You\u{2019}re on the latest version (\(appVersion)).")
+                    if !silent { self.showInfo("You\u{2019}re on the latest version (\(appVersion)).") }
                 }
             }
         }.resume()
