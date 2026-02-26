@@ -217,6 +217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     var statusTimer: Timer?
     var updateCheckTimer: Timer?
     var pendingUpdateJSON: [String: Any]?
+    var isBackgroundMode: Bool = false
     let textWidth: CGFloat = 432
 
     var includeBetaUpdates: Bool {
@@ -226,8 +227,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     static func main() {
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
         let delegate = AppDelegate()
+        let isBackground = CommandLine.arguments.contains("--background")
+        app.setActivationPolicy(isBackground ? .accessory : .regular)
+        delegate.isBackgroundMode = isBackground
         app.delegate = delegate
         app.run()
     }
@@ -254,12 +257,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if isBackgroundMode {
+            NSApp.setActivationPolicy(.regular)
+        }
         showWindow()
         return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        !isBackgroundMode
     }
 
     // MARK: UNUserNotificationCenterDelegate
@@ -293,6 +299,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     func windowWillClose(_ notification: Notification) {
         statusTimer?.invalidate()
         statusTimer = nil
+        if isBackgroundMode {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     func startStatusTimer() {
