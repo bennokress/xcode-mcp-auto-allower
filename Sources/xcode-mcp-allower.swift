@@ -887,10 +887,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // 4. Remove config directory
         try? FileManager.default.removeItem(atPath: configDirectory)
 
-        // 5. Reset Accessibility permission
+        // 5. Remove ~/Library artefacts (Caches, HTTPStorages, Preferences)
+        let home = NSHomeDirectory()
+        for subpath in [
+            "/Library/Caches/\(label)",
+            "/Library/HTTPStorages/\(label)",
+            "/Library/Preferences/\(label).plist",
+        ] {
+            try? FileManager.default.removeItem(atPath: home + subpath)
+        }
+
+        // 6. Reset Accessibility permission
         run("/usr/bin/tccutil", "reset", "Accessibility", label)
 
-        // 6. Spawn detached script to delete the .app bundle after this process exits, then quit
+        // 7. Spawn detached script to delete the .app bundle after this process exits, then quit
         let pid = ProcessInfo.processInfo.processIdentifier
         let script = """
             while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done

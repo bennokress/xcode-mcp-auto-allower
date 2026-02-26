@@ -40,6 +40,18 @@ if [ -f "$HOME/.local/bin/xcode-mcp-allower.swift" ]; then
     echo "    Removed old source at ~/.local/bin/xcode-mcp-allower.swift"
 fi
 
+# Remove ~/Library artefacts (Caches, HTTPStorages, Preferences)
+for SUBPATH in \
+    "Library/Caches/${LABEL}" \
+    "Library/HTTPStorages/${LABEL}" \
+    "Library/Preferences/${LABEL}.plist"; do
+    TARGET="$HOME/$SUBPATH"
+    if [ -e "$TARGET" ]; then
+        rm -rf "$TARGET"
+        echo "    Removed ~/$SUBPATH"
+    fi
+done
+
 # Reset Accessibility permission
 echo "    Resetting Accessibility permission..."
 tccutil reset Accessibility "$LABEL" 2>/dev/null || true
