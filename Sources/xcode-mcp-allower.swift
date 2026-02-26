@@ -3,9 +3,14 @@ import ApplicationServices
 
 // appVersion, githubRepo, githubURL are defined in the generated Version.swift
 
+// MARK: - Constants
+
+let label = "com.local.xcode-mcp-allower"
+let xcodeBundleID = "com.apple.dt.Xcode"
+let logFile = NSHomeDirectory() + "/Library/Logs/xcode-mcp-allower.log"
+
 // MARK: - Daemon Logic
 
-let xcodeBundleID = "com.apple.dt.Xcode"
 var activeObservers: [pid_t: AXObserver] = [:]
 
 /// Permission dialog button labels by language
@@ -141,6 +146,66 @@ func isNewerVersion(_ remote: String, than local: String) -> Bool {
     return false
 }
 
+// MARK: - LaunchAgent Management
+
+func launchAgentPlistPath() -> String {
+    NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
+}
+
+func ensureLaunchAgent() {
+    let plistPath = launchAgentPlistPath()
+    guard let binaryPath = Bundle.main.executablePath else {
+        NSLog("[xcode-mcp-allower] Cannot determine executable path for LaunchAgent.")
+        return
+    }
+
+    // Check if plist exists and already points to current binary
+    if let existing = NSDictionary(contentsOfFile: plistPath),
+       let args = existing["ProgramArguments"] as? [String],
+       args.first == binaryPath {
+        NSLog("[xcode-mcp-allower] LaunchAgent already installed and up to date.")
+        return
+    }
+
+    NSLog("[xcode-mcp-allower] Installing/updating LaunchAgent...")
+
+    // Ensure directory exists
+    let dir = (plistPath as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
+    // Write new plist
+    let plist: [String: Any] = [
+        "Label": label,
+        "ProgramArguments": [binaryPath, "--background"],
+        "RunAtLoad": true,
+        "KeepAlive": true,
+        "AssociatedBundleIdentifiers": label,
+        "StandardOutPath": logFile,
+        "StandardErrorPath": logFile,
+    ]
+    (plist as NSDictionary).write(toFile: plistPath, atomically: true)
+
+    // Reload: bootout old (if any), then bootstrap new
+    let uid = getuid()
+    let task1 = Process()
+    task1.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task1.arguments = ["bootout", "gui/\(uid)/\(label)"]
+    task1.standardOutput = FileHandle.nullDevice
+    task1.standardError = FileHandle.nullDevice
+    try? task1.run()
+    task1.waitUntilExit()
+
+    let task2 = Process()
+    task2.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task2.arguments = ["bootstrap", "gui/\(uid)", plistPath]
+    task2.standardOutput = FileHandle.nullDevice
+    task2.standardError = FileHandle.nullDevice
+    try? task2.run()
+    task2.waitUntilExit()
+
+    NSLog("[xcode-mcp-allower] LaunchAgent installed and loaded.")
+}
+
 // MARK: - App Delegate
 
 @main
@@ -160,6 +225,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ensureLaunchAgent()
         startDaemon()
         if !CommandLine.arguments.contains("--background") {
             showWindow()
@@ -311,7 +377,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let reinstallBtn = NSButton(title: "Reinstall", target: self, action: #selector(reinstall))
+        let reinstallBtn = NSButton(title: "Reinstall LaunchAgent", target: self, action: #selector(reinstallLaunchAgent))
         reinstallBtn.bezelStyle = .rounded
 
         let uninstallBtn = NSButton(title: "Uninstall", target: self, action: #selector(uninstall))
@@ -374,19 +440,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSWorkspace.shared.open(URL(string: githubURL)!)
     }
 
-    @objc func reinstall() {
+    @objc func reinstallLaunchAgent() {
         let alert = NSAlert()
-        alert.messageText = "Reinstall Xcode MCP Auto-Allower?"
-        alert.informativeText = "This will recompile and reinstall the app. It restarts automatically."
+        alert.messageText = "Reinstall LaunchAgent?"
+        alert.informativeText = "This will rewrite and reload the LaunchAgent plist. Use this if the daemon isn\u{2019}t starting correctly."
         alert.addButton(withTitle: "Reinstall")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        guard let repo = repoPath() else {
-            showError("Could not find the source repository. Run ./install.sh manually from the cloned repo.")
-            return
-        }
-        runDetached("cd \(shellQuote(repo)) && ./install.sh")
+        // Force reinstall by removing existing plist first
+        let plistPath = launchAgentPlistPath()
+        try? FileManager.default.removeItem(atPath: plistPath)
+        ensureLaunchAgent()
+        showInfo("LaunchAgent reinstalled and loaded.")
     }
 
     @objc func uninstall() {
@@ -398,11 +464,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.alertStyle = .critical
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        guard let repo = repoPath() else {
-            showError("Could not find the source repository. Run ./uninstall.sh manually from the cloned repo.")
-            return
-        }
-        runDetached("cd \(shellQuote(repo)) && ./uninstall.sh")
+        let uid = getuid()
+        let plistPath = launchAgentPlistPath()
+        let configDir = NSHomeDirectory() + "/.config/xcode-mcp-allower"
+        let appPath = Bundle.main.bundlePath
+
+        // 1. Stop daemon
+        let bootout = Process()
+        bootout.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        bootout.arguments = ["bootout", "gui/\(uid)/\(label)"]
+        bootout.standardOutput = FileHandle.nullDevice
+        bootout.standardError = FileHandle.nullDevice
+        try? bootout.run()
+        bootout.waitUntilExit()
+
+        // 2. Remove LaunchAgent plist
+        try? FileManager.default.removeItem(atPath: plistPath)
+
+        // 3. Remove log file
+        try? FileManager.default.removeItem(atPath: logFile)
+
+        // 4. Remove config directory
+        try? FileManager.default.removeItem(atPath: configDir)
+
+        // 5. Reset Accessibility permission
+        let tcc = Process()
+        tcc.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        tcc.arguments = ["reset", "Accessibility", label]
+        tcc.standardOutput = FileHandle.nullDevice
+        tcc.standardError = FileHandle.nullDevice
+        try? tcc.run()
+        tcc.waitUntilExit()
+
+        // 6. Spawn detached script to delete the .app bundle after this process exits, then quit
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let script = """
+            while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+            rm -rf \(shellQuote(appPath))
+            """
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-c", script]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+
+        NSApp.terminate(nil)
     }
 
     @objc func checkForUpdates() {
@@ -438,7 +545,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     a.addButton(withTitle: "Update")
                     a.addButton(withTitle: "Later")
                     if a.runModal() == .alertFirstButtonReturn {
-                        self.performUpdate()
+                        self.performUpdate(json: json)
                     }
                 } else {
                     self.showInfo("You\u{2019}re up to date! Version \(appVersion) is the latest.")
@@ -447,37 +554,132 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.resume()
     }
 
-    func performUpdate() {
-        guard let repo = repoPath() else {
-            showError("Could not find the source repository.\n\nUpdate manually:\ncd <repo> && git pull && ./install.sh")
+    func performUpdate(json: [String: Any]) {
+        // Find the .dmg asset URL from the release JSON
+        guard let assets = json["assets"] as? [[String: Any]],
+              let dmgAsset = assets.first(where: { ($0["name"] as? String ?? "").hasSuffix(".dmg") }),
+              let downloadURLString = dmgAsset["browser_download_url"] as? String,
+              let downloadURL = URL(string: downloadURLString) else {
+            showError("No DMG found in the latest release.\n\nDownload manually from:\n\(githubURL)/releases")
             return
         }
-        runDetached("cd \(shellQuote(repo)) && git pull && ./install.sh")
+
+        // Show progress
+        let progressAlert = NSAlert()
+        progressAlert.messageText = "Downloading Update..."
+        progressAlert.informativeText = "Please wait while the update is downloaded."
+        progressAlert.addButton(withTitle: "Cancel")
+        progressAlert.buttons.first?.isHidden = true
+
+        let indicator = NSProgressIndicator()
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.startAnimation(nil)
+        indicator.sizeToFit()
+        progressAlert.accessoryView = indicator
+
+        // Run download asynchronously
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("xcode-mcp-allower-update-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let dmgPath = tempDir.appendingPathComponent("update.dmg")
+
+            // Download DMG synchronously on background thread
+            guard let dmgData = try? Data(contentsOf: downloadURL) else {
+                DispatchQueue.main.async {
+                    NSApp.stopModal()
+                    self.showError("Failed to download update.")
+                }
+                return
+            }
+
+            do {
+                try dmgData.write(to: dmgPath)
+            } catch {
+                DispatchQueue.main.async {
+                    NSApp.stopModal()
+                    self.showError("Failed to save update: \(error.localizedDescription)")
+                }
+                return
+            }
+
+            // Mount the DMG
+            let mountTask = Process()
+            mountTask.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            mountTask.arguments = ["attach", dmgPath.path, "-nobrowse", "-readonly", "-quiet"]
+            mountTask.standardOutput = FileHandle.nullDevice
+            mountTask.standardError = FileHandle.nullDevice
+            try? mountTask.run()
+            mountTask.waitUntilExit()
+
+            // Find the .app in the mount point
+            // The volume name matches the app name from the DMG
+            let volumesDir = "/Volumes"
+            guard let volumes = try? FileManager.default.contentsOfDirectory(atPath: volumesDir) else {
+                DispatchQueue.main.async {
+                    NSApp.stopModal()
+                    self.showError("Failed to mount update DMG.")
+                }
+                return
+            }
+
+            var mountedAppPath: String?
+            var mountPoint: String?
+            for vol in volumes {
+                let volPath = "\(volumesDir)/\(vol)"
+                let candidateApp = "\(volPath)/Xcode MCP Auto-Allower.app"
+                if FileManager.default.fileExists(atPath: candidateApp) {
+                    mountedAppPath = candidateApp
+                    mountPoint = volPath
+                    break
+                }
+            }
+
+            guard let sourceApp = mountedAppPath, let mount = mountPoint else {
+                DispatchQueue.main.async {
+                    NSApp.stopModal()
+                    self.showError("Could not find the app in the downloaded DMG.")
+                }
+                return
+            }
+
+            // Spawn detached updater script
+            let currentAppPath = Bundle.main.bundlePath
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let script = """
+                while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+                rm -rf \(self.shellQuote(currentAppPath))
+                cp -R \(self.shellQuote(sourceApp)) \(self.shellQuote((currentAppPath as NSString).deletingLastPathComponent))/
+                hdiutil detach \(self.shellQuote(mount)) -quiet 2>/dev/null || true
+                rm -rf \(self.shellQuote(tempDir.path))
+                sleep 0.5
+                open \(self.shellQuote(currentAppPath))
+                """
+
+            DispatchQueue.main.async {
+                NSApp.stopModal()
+
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/bin/bash")
+                task.arguments = ["-c", script]
+                task.standardOutput = FileHandle.nullDevice
+                task.standardError = FileHandle.nullDevice
+                try? task.run()
+
+                NSApp.terminate(nil)
+            }
+        }
+
+        progressAlert.runModal()
     }
 
     // MARK: Helpers
 
-    func repoPath() -> String? {
-        let configFile = NSHomeDirectory() + "/.config/xcode-mcp-allower/repo-path"
-        guard let path = try? String(contentsOfFile: configFile, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              FileManager.default.fileExists(atPath: path + "/install.sh") else {
-            return nil
-        }
-        return path
-    }
-
     func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    func runDetached(_ command: String) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = ["-c", command]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        try? task.run()
     }
 
     func showError(_ message: String) {
@@ -497,4 +699,3 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         a.runModal()
     }
 }
-

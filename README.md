@@ -16,57 +16,35 @@ The daemon is fully event-driven via Accessibility notifications — no polling,
 
 - macOS 26 (Tahoe)
 - Xcode 26.3+
-- Xcode Command Line Tools (`xcode-select --install`)
 
 ## Install
 
-```bash
-git clone https://github.com/bennokress/xcode-mcp-auto-allower.git
-cd xcode-mcp-auto-allower
-./install.sh
-```
+1. Download the latest DMG from [Releases](https://github.com/bennokress/xcode-mcp-auto-allower/releases)
+2. Open the DMG and drag **Xcode MCP Auto-Allower** to `/Applications`
+3. Launch the app once
+4. Grant **Accessibility** permission when prompted (System Settings > Privacy & Security > Accessibility)
 
-The install script will:
-1. Compile the `.icon` package via `actool` (Liquid Glass icon)
-2. Compile the Swift source via `swiftc -O` with the version from `git describe --tags`
-3. Create an `.app` bundle at `~/Applications/Xcode MCP Auto-Allower.app`
-4. Install a LaunchAgent (`com.local.xcode-mcp-allower`) with `KeepAlive` and `RunAtLoad`
-
-**After installing, grant Accessibility permission** to "Xcode MCP Auto-Allower" in System Settings > Privacy & Security > Accessibility.
+That's it — the daemon installs its LaunchAgent automatically and runs on every login.
 
 ## Management Window
 
-Open `Xcode MCP Auto-Allower.app` from `~/Applications` (or Spotlight) to access:
+Open **Xcode MCP Auto-Allower** from `/Applications` (or Spotlight) to access:
 
 - **Accessibility status** — live indicator showing whether the permission is granted
 - **Open Accessibility Settings** — deep-links to the right pane
-- **Check for Updates** — queries the GitHub Releases API, offers one-click `git pull && ./install.sh`
-- **Reinstall** — recompiles and reinstalls from the local clone
-- **Uninstall** — stops the daemon and removes all installed files
+- **Check for Updates** — queries the GitHub Releases API, downloads and installs the latest DMG
+- **Reinstall LaunchAgent** — rewrites and reloads the LaunchAgent (troubleshooting)
+- **Uninstall** — stops the daemon and removes the app, LaunchAgent, and all related files
 
 The daemon runs silently via the LaunchAgent. The management window only appears when you explicitly open the app — it uses `NSApp.setActivationPolicy(.accessory)` so it stays out of the Dock.
 
 ## Auto-Update
 
-The app checks [github.com/bennokress/xcode-mcp-auto-allower/releases](https://github.com/bennokress/xcode-mcp-auto-allower/releases) for new versions tagged with semver (e.g. `v1.1.0`). Updates run `git pull && ./install.sh` from the stored repo path (`~/.config/xcode-mcp-allower/repo-path`).
-
-You can also update manually:
-
-```bash
-cd xcode-mcp-auto-allower
-git pull
-./install.sh
-```
+The app checks [github.com/bennokress/xcode-mcp-auto-allower/releases](https://github.com/bennokress/xcode-mcp-auto-allower/releases) for new versions tagged with semver (e.g. `v1.1.0`). Updates download the latest DMG, swap the app in place, and relaunch automatically.
 
 ## Uninstall
 
-From the management window, click **Uninstall**. Or from the terminal:
-
-```bash
-./uninstall.sh
-```
-
-This removes the app bundle, LaunchAgent, log file, config, and resets the Accessibility TCC entry.
+From the management window, click **Uninstall**. This removes the app bundle, LaunchAgent, log file, config, and resets the Accessibility TCC entry.
 
 ## How It Works
 
@@ -98,7 +76,7 @@ tail -f ~/Library/Logs/xcode-mcp-allower.log
 
 ## App Icon
 
-The app icon is an Xcode 26 Icon Composer package (`App Icon.icon/`). During install, `actool` compiles it into `Assets.car` with Liquid Glass rendering. To customize, edit the `.icon` package in Icon Composer and re-run `./install.sh`.
+The app icon is an Xcode 26 Icon Composer package (`App Icon.icon/`). During build, `actool` compiles it into `Assets.car` with Liquid Glass rendering. To customize, edit the `.icon` package in Icon Composer and rebuild.
 
 ## Troubleshooting
 
@@ -106,7 +84,7 @@ The app icon is an Xcode 26 Icon Composer package (`App Icon.icon/`). During ins
 ```bash
 launchctl list | grep xcode-mcp-allower
 ```
-If no PID is shown, check the log file for errors.
+If no PID is shown, open the app and click **Reinstall LaunchAgent**, or check the log file for errors.
 
 **Accessibility not granted?**
 Open the app — the status indicator shows live permission state with a direct link to the settings pane.
@@ -114,8 +92,31 @@ Open the app — the status indicator shows live permission state with a direct 
 **Dialog not being clicked?**
 Check the log. If a dialog is detected but no button matches, add your language's "Allow"/"Don't Allow" equivalents to the label sets in the source.
 
-**Reinstalling?**
-Open the app and click **Reinstall**, or run `./install.sh` from the terminal.
+## Development
+
+For local development (compiles from source, no signing):
+
+```bash
+git clone https://github.com/bennokress/xcode-mcp-auto-allower.git
+cd xcode-mcp-auto-allower
+./install.sh
+```
+
+Requires Xcode Command Line Tools (`xcode-select --install`).
+
+### Building a Release DMG
+
+```bash
+# Set signing & notarization credentials
+export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"
+export APPLE_ID="you@example.com"
+export TEAM_ID="TEAMID"
+export APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"  # or @keychain:notarytool
+
+./scripts/build-dmg.sh
+```
+
+The signed + notarized DMG is output to `dist/`.
 
 ---
 
