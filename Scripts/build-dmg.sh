@@ -75,7 +75,7 @@ VEOF
 # Step 3: Compile binary
 # ---------------------------------------------------------------------------
 echo "    Compiling..."
-swiftc -O "${REPO_DIR}/Sources/xcode-mcp-allower.swift" "${BUILD_DIR}/Version.swift" \
+swiftc -O "${REPO_DIR}"/Sources/*.swift "${BUILD_DIR}/Version.swift" \
     -o "${BUILD_DIR}/${BINARY_NAME}"
 echo "    Compiled successfully."
 
