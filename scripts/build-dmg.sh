@@ -5,15 +5,16 @@ set -euo pipefail
 # build-dmg.sh — Build, sign, notarize, and package the app into a DMG.
 # Developer-only script. Not shipped to users.
 #
-# Required environment variables for signing & notarization:
-#   DEVELOPER_ID  — Signing identity (e.g. "Developer ID Application: Name (TEAM)")
-#   APPLE_ID      — Apple ID email for notarization
-#   TEAM_ID       — Apple Developer Team ID
-#   APP_PASSWORD  — App-specific password (or @keychain:notarytool reference)
+# Signing identity:
+#   DEVELOPER_ID env var, or auto-detected from Keychain.
 #
-# If DEVELOPER_ID is not set, the script will attempt to auto-detect it.
-# If notarization credentials are missing, signing still proceeds but
-# notarization is skipped (useful for local testing).
+# Notarization (two modes):
+#   1. Keychain profile (local): store credentials once with
+#        xcrun notarytool store-credentials "notarytool" --team-id TEAMID
+#      The script auto-detects the "notarytool" profile.
+#   2. Env vars (CI): set APPLE_ID, TEAM_ID, and APP_PASSWORD.
+#
+# If neither is available, notarization is skipped.
 # =============================================================================
 
 APP_NAME="Xcode MCP Auto-Allower"
@@ -186,19 +187,24 @@ fi
 # ---------------------------------------------------------------------------
 # Step 8 & 9: Notarize and staple
 # ---------------------------------------------------------------------------
+NOTARIZE_CMD=""
 if [ -n "${APPLE_ID:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${APP_PASSWORD:-}" ]; then
+    # CI mode: credentials via env vars
+    NOTARIZE_CMD="xcrun notarytool submit \"$DMG_PATH\" --apple-id \"$APPLE_ID\" --team-id \"$TEAM_ID\" --password \"$APP_PASSWORD\" --wait"
+elif xcrun notarytool history --keychain-profile "notarytool" >/dev/null 2>&1; then
+    # Local mode: keychain profile
+    NOTARIZE_CMD="xcrun notarytool submit \"$DMG_PATH\" --keychain-profile \"notarytool\" --wait"
+fi
+
+if [ -n "$NOTARIZE_CMD" ]; then
     echo "==> Submitting for notarization..."
-    xcrun notarytool submit "$DMG_PATH" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
-        --wait
+    eval "$NOTARIZE_CMD"
 
     echo "==> Stapling notarization ticket..."
     xcrun stapler staple "$DMG_PATH"
     echo "    Notarization complete."
 else
-    echo "==> Skipping notarization (APPLE_ID, TEAM_ID, or APP_PASSWORD not set)."
+    echo "==> Skipping notarization (no keychain profile 'notarytool' and no APPLE_ID/TEAM_ID/APP_PASSWORD env vars)."
 fi
 
 # ---------------------------------------------------------------------------
